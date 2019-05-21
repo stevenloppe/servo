@@ -46,7 +46,7 @@ def install_trusty_deps(force):
 
 
 def check_gstreamer_lib():
-    return subprocess.call(["pkg-config", "gstreamer-1.0 >= 1.12"],
+    return subprocess.call(["pkg-config", "--atleast-version=1.14", "gstreamer-1.0"],
                            stdout=PIPE, stderr=PIPE) == 0
 
 
@@ -94,7 +94,7 @@ def install_salt_dependencies(context, force):
 def gstreamer(context, force=False):
     cur = os.curdir
     gstdir = os.path.join(cur, "support", "linux", "gstreamer")
-    if not os.path.isdir(os.path.join(gstdir, "gstreamer", "lib")):
+    if not os.path.isdir(os.path.join(gstdir, "gst", "lib")):
         subprocess.check_call(["bash", "gstreamer.sh"], cwd=gstdir)
         return True
     return False
@@ -110,10 +110,11 @@ def linux(context, force=False):
     # Please keep these in sync with the packages in README.md
     pkgs_apt = ['git', 'curl', 'autoconf', 'libx11-dev', 'libfreetype6-dev',
                 'libgl1-mesa-dri', 'libglib2.0-dev', 'xorg-dev', 'gperf', 'g++',
-                'build-essential', 'cmake', 'python-pip',
-                'libbz2-dev', 'libosmesa6-dev', 'libxmu6', 'libxmu-dev', 'libglu1-mesa-dev',
+                'build-essential', 'cmake', 'python-pip', "libssl-dev",
+                'libbz2-dev', 'liblzma-dev',
+                'libosmesa6-dev', 'libxmu6', 'libxmu-dev', 'libglu1-mesa-dev',
                 'libgles2-mesa-dev', 'libegl1-mesa-dev', 'libdbus-1-dev', 'libharfbuzz-dev',
-                'ccache', 'clang', 'autoconf2.13']
+                'ccache', 'clang', 'autoconf2.13', "libunwind-dev"]
     pkgs_dnf = ['libtool', 'gcc-c++', 'libXi-devel', 'freetype-devel',
                 'mesa-libGL-devel', 'mesa-libEGL-devel', 'glib2-devel', 'libX11-devel',
                 'libXrandr-devel', 'gperf', 'fontconfig-devel', 'cabextract', 'ttmkfdir',
@@ -123,24 +124,12 @@ def linux(context, force=False):
                 'ccache', 'mesa-libGLU-devel', 'clang', 'clang-libs', 'gstreamer1-devel',
                 'gstreamer1-plugins-base-devel', 'gstreamer1-plugins-bad-free-devel', 'autoconf213']
     if context.distro == "Ubuntu":
-        if context.distro_version == "17.04":
-            pkgs_apt += ["libssl-dev"]
-        elif int(context.distro_version.split(".")[0]) < 17:
-            pkgs_apt += ["libssl-dev"]
-        else:
-            pkgs_apt += ["libssl1.0-dev"]
-
         if context.distro_version == "14.04":
             pkgs_apt += ["python-virtualenv"]
         else:
             pkgs_apt += ["virtualenv"]
             pkgs_apt += ['libgstreamer1.0-dev', 'libgstreamer-plugins-base1.0-dev',
                          'libgstreamer-plugins-bad1.0-dev']
-
-    elif context.distro == "Debian" and context.distro_version == "Sid":
-        pkgs_apt += ["libssl-dev"]
-    else:
-        pkgs_apt += ["libssl1.0-dev"]
 
     installed_something = install_linux_deps(context, pkgs_apt, pkgs_dnf, force)
 
@@ -383,14 +372,16 @@ def get_linux_distribution():
             base_version = '10.10'
         else:
             raise Exception('unsupported version of %s: %s' % (distro, version))
-
         distro, version = 'Ubuntu', base_version
+    elif distro.lower() == 'ubuntu':
+        if version > '19.04':
+            raise Exception('unsupported version of %s: %s' % (distro, version))
+    # Fixme: we should allow checked/supported versions only
     elif distro.lower() not in [
         'centos',
         'centos linux',
         'debian',
         'fedora',
-        'ubuntu',
     ]:
         raise Exception('mach bootstrap does not support %s, please file a bug' % distro)
 

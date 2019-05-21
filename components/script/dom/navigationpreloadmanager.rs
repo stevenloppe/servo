@@ -1,7 +1,8 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use crate::compartments::{AlreadyInCompartment, InCompartment};
 use crate::dom::bindings::codegen::Bindings::NavigationPreloadManagerBinding::NavigationPreloadState;
 use crate::dom::bindings::codegen::Bindings::NavigationPreloadManagerBinding::{
     NavigationPreloadManagerMethods, Wrap,
@@ -44,7 +45,11 @@ impl NavigationPreloadManager {
 impl NavigationPreloadManagerMethods for NavigationPreloadManager {
     // https://w3c.github.io/ServiceWorker/#navigation-preload-manager-enable
     fn Enable(&self) -> Rc<Promise> {
-        let promise = Promise::new(&*self.global());
+        let in_compartment_proof = AlreadyInCompartment::assert(&*self.global());
+        let promise = Promise::new_in_current_compartment(
+            &*self.global(),
+            InCompartment::Already(&in_compartment_proof),
+        );
 
         // 2.
         if self.serviceworker_registration.active().is_none() {
@@ -66,7 +71,11 @@ impl NavigationPreloadManagerMethods for NavigationPreloadManager {
 
     // https://w3c.github.io/ServiceWorker/#navigation-preload-manager-disable
     fn Disable(&self) -> Rc<Promise> {
-        let promise = Promise::new(&*self.global());
+        let in_compartment_proof = AlreadyInCompartment::assert(&*self.global());
+        let promise = Promise::new_in_current_compartment(
+            &*self.global(),
+            InCompartment::Already(&in_compartment_proof),
+        );
 
         // 2.
         if self.serviceworker_registration.active().is_none() {
@@ -88,7 +97,11 @@ impl NavigationPreloadManagerMethods for NavigationPreloadManager {
 
     // https://w3c.github.io/ServiceWorker/#navigation-preload-manager-setheadervalue
     fn SetHeaderValue(&self, value: ByteString) -> Rc<Promise> {
-        let promise = Promise::new(&*self.global());
+        let in_compartment_proof = AlreadyInCompartment::assert(&*self.global());
+        let promise = Promise::new_in_current_compartment(
+            &*self.global(),
+            InCompartment::Already(&in_compartment_proof),
+        );
 
         // 2.
         if self.serviceworker_registration.active().is_none() {
@@ -110,7 +123,11 @@ impl NavigationPreloadManagerMethods for NavigationPreloadManager {
 
     // https://w3c.github.io/ServiceWorker/#navigation-preload-manager-getstate
     fn GetState(&self) -> Rc<Promise> {
-        let promise = Promise::new(&*self.global());
+        let in_compartment_proof = AlreadyInCompartment::assert(&*self.global());
+        let promise = Promise::new_in_current_compartment(
+            &*self.global(),
+            InCompartment::Already(&in_compartment_proof),
+        );
         // 2.
         let mut state = NavigationPreloadState::empty();
 

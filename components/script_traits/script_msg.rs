@@ -14,13 +14,13 @@ use crate::WorkerGlobalScopeInit;
 use crate::WorkerScriptLoadOrigin;
 use canvas_traits::canvas::{CanvasId, CanvasMsg};
 use devtools_traits::{ScriptToDevtoolsControlMsg, WorkerId};
-use embedder_traits::{Cursor, EmbedderMsg};
+use embedder_traits::EmbedderMsg;
 use euclid::{Size2D, TypedSize2D};
 use gfx_traits::Epoch;
 use ipc_channel::ipc::{IpcReceiver, IpcSender};
 use msg::constellation_msg::{BrowsingContextId, PipelineId, TopLevelBrowsingContextId};
 use msg::constellation_msg::{HistoryStateId, TraversalDirection};
-use net_traits::request::RequestInit;
+use net_traits::request::RequestBuilder;
 use net_traits::storage_thread::StorageType;
 use net_traits::CoreResourceMsg;
 use servo_url::ImmutableOrigin;
@@ -58,8 +58,6 @@ pub enum LayoutMsg {
     /// Requests that the constellation inform the compositor that it needs to record
     /// the time when the frame with the given ID (epoch) is painted.
     PendingPaintMetric(PipelineId, Epoch),
-    /// Requests that the constellation inform the compositor of the a cursor change.
-    SetCursor(Cursor),
     /// Notifies the constellation that the viewport has been constrained in some manner
     ViewportConstrained(PipelineId, ViewportConstraints),
 }
@@ -71,7 +69,6 @@ impl fmt::Debug for LayoutMsg {
             ChangeRunningAnimationsState(..) => "ChangeRunningAnimationsState",
             IFrameSizes(..) => "IFrameSizes",
             PendingPaintMetric(..) => "PendingPaintMetric",
-            SetCursor(..) => "SetCursor",
             ViewportConstrained(..) => "ViewportConstrained",
         };
         write!(formatter, "LayoutMsg::{}", variant)
@@ -107,7 +104,7 @@ pub enum ScriptMsg {
     ForwardToEmbedder(EmbedderMsg),
     /// Requests are sent to constellation and fetches are checked manually
     /// for cross-origin loads
-    InitiateNavigateRequest(RequestInit, /* cancellation_chan */ IpcReceiver<()>),
+    InitiateNavigateRequest(RequestBuilder, /* cancellation_chan */ IpcReceiver<()>),
     /// Broadcast a storage event to every same-origin pipeline.
     /// The strings are key, old value and new value.
     BroadcastStorageEvent(
@@ -121,7 +118,7 @@ pub enum ScriptMsg {
     ChangeRunningAnimationsState(AnimationState),
     /// Requests that a new 2D canvas thread be created. (This is done in the constellation because
     /// 2D canvases may use the GPU and we don't want to give untrusted content access to the GPU.)
-    CreateCanvasPaintThread(Size2D<u32>, IpcSender<(IpcSender<CanvasMsg>, CanvasId)>),
+    CreateCanvasPaintThread(Size2D<u64>, IpcSender<(IpcSender<CanvasMsg>, CanvasId)>),
     /// Notifies the constellation that this frame has received focus.
     Focus,
     /// Requests that the constellation retrieve the current contents of the clipboard
@@ -175,8 +172,6 @@ pub enum ScriptMsg {
     /// Notification that this iframe should be removed.
     /// Returns a list of pipelines which were closed.
     RemoveIFrame(BrowsingContextId, IpcSender<Vec<PipelineId>>),
-    /// Change pipeline visibility
-    SetVisible(bool),
     /// Notifies constellation that an iframe's visibility has been changed.
     VisibilityChangeComplete(bool),
     /// A load has been requested in an IFrame.
@@ -243,7 +238,6 @@ impl fmt::Debug for ScriptMsg {
             ReplaceHistoryState(..) => "ReplaceHistoryState",
             JointSessionHistoryLength(..) => "JointSessionHistoryLength",
             RemoveIFrame(..) => "RemoveIFrame",
-            SetVisible(..) => "SetVisible",
             VisibilityChangeComplete(..) => "VisibilityChangeComplete",
             ScriptLoadedURLInIFrame(..) => "ScriptLoadedURLInIFrame",
             ScriptNewIFrame(..) => "ScriptNewIFrame",

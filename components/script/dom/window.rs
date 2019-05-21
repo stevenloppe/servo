@@ -76,10 +76,10 @@ use embedder_traits::EmbedderMsg;
 use euclid::{Point2D, Rect, Size2D, TypedPoint2D, TypedScale, TypedSize2D, Vector2D};
 use ipc_channel::ipc::{channel, IpcSender};
 use ipc_channel::router::ROUTER;
-use js::jsapi::JSAutoCompartment;
+use js::jsapi::JSAutoRealm;
 use js::jsapi::JSContext;
 use js::jsapi::JSPROP_ENUMERATE;
-use js::jsapi::JS_GC;
+use js::jsapi::{GCReason, JS_GC};
 use js::jsval::JSVal;
 use js::jsval::UndefinedValue;
 use js::rust::wrappers::JS_DefineProperty;
@@ -87,12 +87,13 @@ use js::rust::HandleValue;
 use msg::constellation_msg::PipelineId;
 use net_traits::image_cache::{ImageCache, ImageResponder, ImageResponse};
 use net_traits::image_cache::{PendingImageId, PendingImageResponse};
+use net_traits::request::Referrer;
 use net_traits::storage_thread::StorageType;
 use net_traits::{ReferrerPolicy, ResourceThreads};
 use num_traits::ToPrimitive;
 use profile_traits::ipc as ProfiledIpc;
 use profile_traits::mem::ProfilerChan as MemProfilerChan;
-use profile_traits::time::ProfilerChan as TimeProfilerChan;
+use profile_traits::time::{ProfilerChan as TimeProfilerChan, ProfilerMsg};
 use script_layout_interface::message::{Msg, QueryMsg, Reflow, ReflowGoal, ScriptReflow};
 use script_layout_interface::rpc::{ContentBoxResponse, ContentBoxesResponse, LayoutRPC};
 use script_layout_interface::rpc::{
@@ -117,7 +118,7 @@ use std::fs;
 use std::io::{stderr, stdout, Write};
 use std::mem;
 use std::rc::Rc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use style::dom::OpaqueNode;
 use style::error_reporting::{ContextualParseError, ParseErrorReporter};
@@ -293,6 +294,10 @@ pub struct Window {
     /// Indicate whether a SetDocumentStatus message has been sent after a reflow is complete.
     /// It is used to avoid sending idle message more than once, which is unneccessary.
     has_sent_idle_message: Cell<bool>,
+
+    /// Flag that indicates if the layout thread is busy handling a request.
+    #[ignore_malloc_size_of = "Arc<T> is hard"]
+    layout_is_busy: Arc<AtomicBool>,
 }
 
 impl Window {
@@ -896,7 +901,7 @@ impl WindowMethods for Window {
     #[allow(unsafe_code)]
     fn Gc(&self) {
         unsafe {
-            JS_GC(self.get_cx());
+            JS_GC(self.get_cx(), GCReason::API);
         }
     }
 
@@ -1155,12 +1160,17 @@ impl WindowMethods for Window {
 
     // https://html.spec.whatwg.org/multipage/#dom-name
     fn SetName(&self, name: DOMString) {
-        self.window_proxy().set_name(name);
+        if let Some(proxy) = self.undiscarded_window_proxy() {
+            proxy.set_name(name);
+        }
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-name
     fn Name(&self) -> DOMString {
-        self.window_proxy().get_name()
+        match self.undiscarded_window_proxy() {
+            Some(proxy) => proxy.get_name(),
+            None => "".into(),
+        }
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-origin
@@ -1558,6 +1568,12 @@ impl Window {
     }
 
     pub fn layout_reflow(&self, query_msg: QueryMsg) -> bool {
+        if self.layout_is_busy.load(Ordering::Relaxed) {
+            let url = self.get_url().into_string();
+            self.time_profiler_chan()
+                .send(ProfilerMsg::BlockedLayoutQuery(url));
+        }
+
         self.reflow(
             ReflowGoal::LayoutQuery(query_msg, time::precise_time_ns()),
             ReflowReason::Query,
@@ -1716,6 +1732,7 @@ impl Window {
         url: ServoUrl,
         replace: bool,
         force_reload: bool,
+        referrer: Referrer,
         referrer_policy: Option<ReferrerPolicy>,
     ) {
         let doc = self.Document();
@@ -1781,7 +1798,7 @@ impl Window {
             self.main_thread_script_chan()
                 .send(MainThreadScriptMsg::Navigate(
                     pipeline_id,
-                    LoadData::new(url, Some(pipeline_id), referrer_policy, Some(doc.url())),
+                    LoadData::new(url, Some(pipeline_id), Some(referrer), referrer_policy),
                     replace,
                 ))
                 .unwrap();
@@ -2023,6 +2040,7 @@ impl Window {
         microtask_queue: Rc<MicrotaskQueue>,
         webrender_document: DocumentId,
         webrender_api_sender: RenderApiSender,
+        layout_is_busy: Arc<AtomicBool>,
     ) -> DomRoot<Self> {
         let layout_rpc: Box<dyn LayoutRPC + Send> = {
             let (rpc_send, rpc_recv) = unbounded();
@@ -2095,6 +2113,7 @@ impl Window {
             exists_mut_observer: Cell::new(false),
             webrender_api_sender,
             has_sent_idle_message: Cell::new(false),
+            layout_is_busy,
         });
 
         unsafe { WindowBinding::Wrap(runtime.cx(), win) }
@@ -2199,7 +2218,7 @@ impl Window {
             // Steps 7.2.-7.5.
             let cx = this.get_cx();
             let obj = this.reflector().get_jsobject();
-            let _ac = JSAutoCompartment::new(cx, obj.get());
+            let _ac = JSAutoRealm::new(cx, obj.get());
             rooted!(in(cx) let mut message_clone = UndefinedValue());
             serialize_with_transfer_result.read(
                 this.upcast(),

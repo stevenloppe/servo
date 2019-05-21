@@ -1,4 +1,5 @@
 language: python
+python: 2.7
 
 matrix:
   fast_finish: true
@@ -6,6 +7,7 @@ matrix:
     - sudo: false
       before_install:
         - curl https://sh.rustup.rs -sSf | sh -s -- --default-toolchain none -y
+        - pip install virtualenv
         - source ~/.profile
       script:
          - ./mach test-tidy --no-progress --all
@@ -14,20 +16,21 @@ matrix:
          - bash etc/ci/check_no_panic.sh
       cache: false
     - sudo: 9000
-      dist: trusty
+      dist: xenial
       before_install:
         - sudo add-apt-repository ppa:ubuntu-toolchain-r/test -y
-        - sudo add-apt-repository 'deb http://apt.llvm.org/precise/ llvm-toolchain-precise-3.9 main' -y
+        - sudo add-apt-repository 'deb http://apt.llvm.org/xenial/ llvm-toolchain-xenial-3.9 main' -y
         - sudo apt-get update -q
-        - sudo apt-get install clang-3.9 llvm-3.9 llvm-3.9-runtime -y
-        - curl -L https://servo-deps.s3.amazonaws.com/gstreamer/gstreamer-x86_64-linux-gnu.tar.gz | tar xz
-        - sed -i "s;prefix=/root/gstreamer;prefix=$PWD/gstreamer;g" $PWD/gstreamer/lib/x86_64-linux-gnu/pkgconfig/*.pc
-        - export PKG_CONFIG_PATH=$PWD/gstreamer/lib/x86_64-linux-gnu/pkgconfig
-        - export GST_PLUGIN_SYSTEM_PATH=$PWD/gstreamer/lib/x86_64-linux-gnu/gstreamer-1.0
-        - export GST_PLUGIN_SCANNER=$PWD/gstreamer/libexec/gstreamer-1.0/gst-plugin-scanner
-        - export PATH=$PATH:$PWD/gstreamer/bin
-        - export LD_LIBRARY_PATH=$PWD/gstreamer/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
-        - export LLVM_CONFIG=/usr/lib/llvm-3.9/bin/llvm-config
+        - sudo apt-get install clang-3.9 llvm-3.9-dev llvm-3.9-runtime libunwind8-dev -y
+        - pip install virtualenv
+        - curl -L https://servo-deps.s3.amazonaws.com/gstreamer/gstreamer-1.16-x86_64-linux-gnu.20190515.tar.gz | tar xz
+        - sed -i "s;prefix=/opt/gst;prefix=$PWD/gst;g" $PWD/gst/lib/pkgconfig/*.pc
+        - export PKG_CONFIG_PATH=$PWD/gst/lib/pkgconfig
+        - export GST_PLUGIN_SYSTEM_PATH=$PWD/gst/lib/gstreamer-1.0
+        - export GST_PLUGIN_SCANNER=$PWD/gst/libexec/gstreamer-1.0/gst-plugin-scanner
+        - export PATH=$PATH:$PWD/gst/bin
+        - export LD_LIBRARY_PATH=$PWD/gst/lib:$LD_LIBRARY_PATH
+        - export LLVM_CONFIG=llvm-config-3.9
         - curl https://sh.rustup.rs -sSf | sh -s -- --default-toolchain none -y
         - source ~/.profile
       script:
@@ -61,9 +64,11 @@ matrix:
           packages:
             - autoconf2.13
             - cmake
+            - gcc-6
             - g++-6
             - gperf
             - libosmesa6-dev
+            - libglu1-mesa-dev
             - libgles2-mesa-dev
             - python-virtualenv
             - xorg-dev

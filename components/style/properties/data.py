@@ -324,6 +324,7 @@ class Longhand(object):
                 "JustifyItems",
                 "JustifySelf",
                 "MozForceBrokenImageIcon",
+                "MozListReversed",
                 "MozScriptLevel",
                 "MozScriptMinSize",
                 "MozScriptSizeMultiplier",
@@ -336,16 +337,22 @@ class Longhand(object):
                 "OverflowWrap",
                 "OverscrollBehavior",
                 "Percentage",
+                "PositiveIntegerOrNone",
                 "Resize",
                 "SVGOpacity",
                 "SVGPaintOrder",
+                "ScrollSnapAlign",
+                "ScrollSnapAxis",
+                "ScrollSnapStrictness",
                 "ScrollSnapType",
                 "TextAlign",
                 "TextDecorationLine",
                 "TextEmphasisPosition",
+                "TextTransform",
                 "TouchAction",
                 "TransformStyle",
                 "UserSelect",
+                "WordBreak",
                 "XSpan",
                 "XTextZoom",
                 "ZIndex",
@@ -394,8 +401,6 @@ class Shorthand(object):
             and allowed_in_keyframe_block != "False"
 
     def get_animatable(self):
-        if self.ident == "all":
-            return False
         for sub in self.sub_properties:
             if sub.animatable:
                 return True

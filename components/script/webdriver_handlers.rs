@@ -22,7 +22,7 @@ use crate::dom::htmlelement::HTMLElement;
 use crate::dom::htmliframeelement::HTMLIFrameElement;
 use crate::dom::htmlinputelement::HTMLInputElement;
 use crate::dom::htmloptionelement::HTMLOptionElement;
-use crate::dom::node::{window_from_node, Node};
+use crate::dom::node::{window_from_node, Node, ShadowIncluding};
 use crate::script_thread::Documents;
 use cookie::Cookie;
 use euclid::{Point2D, Rect, Size2D};
@@ -34,7 +34,7 @@ use js::rust::HandleValue;
 use msg::constellation_msg::BrowsingContextId;
 use msg::constellation_msg::PipelineId;
 use net_traits::CookieSource::{NonHTTP, HTTP};
-use net_traits::CoreResourceMsg::{GetCookiesDataForUrl, SetCookieForUrl};
+use net_traits::CoreResourceMsg::{DeleteCookies, GetCookiesDataForUrl, SetCookieForUrl};
 use net_traits::IpcSend;
 use script_traits::webdriver_msg::WebDriverCookieError;
 use script_traits::webdriver_msg::{
@@ -50,7 +50,7 @@ fn find_node_by_unique_id(
     documents.find_document(pipeline).and_then(|document| {
         document
             .upcast::<Node>()
-            .traverse_preorder()
+            .traverse_preorder(ShadowIncluding::Yes)
             .find(|candidate| candidate.unique_id() == node_id)
     })
 }
@@ -203,6 +203,45 @@ pub fn handle_find_elements_css(
     reply.send(node_ids).unwrap();
 }
 
+pub fn handle_find_element_element_css(
+    documents: &Documents,
+    pipeline: PipelineId,
+    element_id: String,
+    selector: String,
+    reply: IpcSender<Result<Option<String>, ()>>,
+) {
+    let node_id = find_node_by_unique_id(documents, pipeline, element_id)
+        .ok_or(())
+        .and_then(|node| {
+            node.query_selector(DOMString::from(selector))
+                .map_err(|_| ())
+        })
+        .map(|node| node.map(|x| x.upcast::<Node>().unique_id()));
+    reply.send(node_id).unwrap();
+}
+
+pub fn handle_find_element_elements_css(
+    documents: &Documents,
+    pipeline: PipelineId,
+    element_id: String,
+    selector: String,
+    reply: IpcSender<Result<Option<String>, ()>>,
+) {
+    let node_ids = find_node_by_unique_id(documents, pipeline, element_id)
+        .ok_or(())
+        .and_then(|node| {
+            node.query_selector_all(DOMString::from(selector))
+                .map_err(|_| ())
+        })
+        .map(|nodes| {
+            nodes
+                .iter()
+                .map(|x| Some(x.upcast::<Node>().unique_id()))
+                .collect()
+        });
+    reply.send(node_ids).unwrap();
+}
+
 pub fn handle_focus_element(
     documents: &Documents,
     pipeline: PipelineId,
@@ -337,6 +376,27 @@ pub fn handle_add_cookie(
             (_, _) => Err(WebDriverCookieError::UnableToSetCookie),
         })
         .unwrap();
+}
+
+pub fn handle_delete_cookies(
+    documents: &Documents,
+    pipeline: PipelineId,
+    reply: IpcSender<Result<(), ()>>,
+) {
+    let document = match documents.find_document(pipeline) {
+        Some(document) => document,
+        None => {
+            return reply.send(Err(())).unwrap();
+        },
+    };
+    let url = document.url();
+    document
+        .window()
+        .upcast::<GlobalScope>()
+        .resource_threads()
+        .send(DeleteCookies(url))
+        .unwrap();
+    let _ = reply.send(Ok(()));
 }
 
 pub fn handle_get_title(documents: &Documents, pipeline: PipelineId, reply: IpcSender<String>) {

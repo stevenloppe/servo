@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use crate::compartments::{AlreadyInCompartment, InCompartment};
 use crate::dom::bindings::codegen::Bindings::RequestBinding::RequestInfo;
 use crate::dom::bindings::codegen::Bindings::RequestBinding::RequestInit;
 use crate::dom::bindings::codegen::Bindings::ResponseBinding::ResponseBinding::ResponseMethods;
@@ -19,14 +20,17 @@ use crate::dom::promise::Promise;
 use crate::dom::request::Request;
 use crate::dom::response::Response;
 use crate::dom::serviceworkerglobalscope::ServiceWorkerGlobalScope;
-use crate::network_listener::{self, NetworkListener, PreInvoke, ResourceTimingListener};
+use crate::network_listener::{
+    self, submit_timing_data, NetworkListener, PreInvoke, ResourceTimingListener,
+};
 use crate::task_source::TaskSourceName;
 use ipc_channel::ipc;
 use ipc_channel::router::ROUTER;
-use js::jsapi::JSAutoCompartment;
-use net_traits::request::RequestInit as NetTraitsRequestInit;
+use js::jsapi::JSAutoRealm;
+use net_traits::request::RequestBuilder;
 use net_traits::request::{Request as NetTraitsRequest, ServiceWorkersMode};
 use net_traits::CoreResourceMsg::Fetch as NetTraitsFetch;
+use net_traits::{CoreResourceMsg, CoreResourceThread, FetchResponseMsg};
 use net_traits::{FetchChannels, FetchResponseListener, NetworkError};
 use net_traits::{FetchMetadata, FilteredMetadata, Metadata};
 use net_traits::{ResourceFetchTiming, ResourceTimingType};
@@ -94,20 +98,18 @@ impl Drop for FetchCanceller {
     }
 }
 
-fn from_referrer_to_referrer_url(request: &NetTraitsRequest) -> Option<ServoUrl> {
-    request.referrer.to_url().map(|url| url.clone())
-}
-
-fn request_init_from_request(request: NetTraitsRequest) -> NetTraitsRequestInit {
-    NetTraitsRequestInit {
+fn request_init_from_request(request: NetTraitsRequest) -> RequestBuilder {
+    RequestBuilder {
         method: request.method.clone(),
         url: request.url(),
         headers: request.headers.clone(),
         unsafe_request: request.unsafe_request,
         body: request.body.clone(),
+        service_workers_mode: ServiceWorkersMode::All,
         destination: request.destination,
         synchronous: request.synchronous,
         mode: request.mode.clone(),
+        cache_mode: request.cache_mode,
         use_cors_preflight: request.use_cors_preflight,
         credentials_mode: request.credentials_mode,
         use_url_credentials: request.use_url_credentials,
@@ -116,12 +118,13 @@ fn request_init_from_request(request: NetTraitsRequest) -> NetTraitsRequestInit 
             .origin()
             .immutable()
             .clone(),
-        referrer_url: from_referrer_to_referrer_url(&request),
+        referrer: Some(request.referrer.clone()),
         referrer_policy: request.referrer_policy,
         pipeline_id: request.pipeline_id,
         redirect_mode: request.redirect_mode,
-        cache_mode: request.cache_mode,
-        ..NetTraitsRequestInit::default()
+        integrity_metadata: "".to_owned(),
+        url_list: vec![],
+        parser_metadata: request.parser_metadata,
     }
 }
 
@@ -135,7 +138,8 @@ pub fn Fetch(
     let core_resource_thread = global.core_resource_thread();
 
     // Step 1
-    let promise = Promise::new(global);
+    let aic = AlreadyInCompartment::assert(global);
+    let promise = Promise::new_in_current_compartment(global, InCompartment::Already(&aic));
     let response = Response::new(global);
 
     // Step 2
@@ -207,10 +211,10 @@ impl FetchResponseListener for FetchContext {
             .expect("fetch promise is missing")
             .root();
 
-        // JSAutoCompartment needs to be manually made.
+        // JSAutoRealm needs to be manually made.
         // Otherwise, Servo will crash.
         let promise_cx = promise.global().get_cx();
-        let _ac = JSAutoCompartment::new(promise_cx, promise.reflector().get_jsobject().get());
+        let _ac = JSAutoRealm::new(promise_cx, promise.reflector().get_jsobject().get());
         match fetch_metadata {
             // Step 4.1
             Err(_) => {
@@ -260,7 +264,7 @@ impl FetchResponseListener for FetchContext {
         let response = self.response_object.root();
         let global = response.global();
         let cx = global.get_cx();
-        let _ac = JSAutoCompartment::new(cx, global.reflector().get_jsobject().get());
+        let _ac = JSAutoRealm::new(cx, global.reflector().get_jsobject().get());
         response.finish(mem::replace(&mut self.body, vec![]));
         // TODO
         // ... trailerObject is not supported in Servo yet.
@@ -300,4 +304,44 @@ fn fill_headers_with_metadata(r: DomRoot<Response>, m: Metadata) {
     r.set_headers(m.headers);
     r.set_raw_status(m.status);
     r.set_final_url(m.final_url);
+}
+
+/// Convenience function for synchronously loading a whole resource.
+pub fn load_whole_resource(
+    request: RequestBuilder,
+    core_resource_thread: &CoreResourceThread,
+    global: &GlobalScope,
+) -> Result<(Metadata, Vec<u8>), NetworkError> {
+    let (action_sender, action_receiver) = ipc::channel().unwrap();
+    let url = request.url.clone();
+    core_resource_thread
+        .send(CoreResourceMsg::Fetch(
+            request,
+            FetchChannels::ResponseMsg(action_sender, None),
+        ))
+        .unwrap();
+
+    let mut buf = vec![];
+    let mut metadata = None;
+    loop {
+        match action_receiver.recv().unwrap() {
+            FetchResponseMsg::ProcessRequestBody | FetchResponseMsg::ProcessRequestEOF => (),
+            FetchResponseMsg::ProcessResponse(Ok(m)) => {
+                metadata = Some(match m {
+                    FetchMetadata::Unfiltered(m) => m,
+                    FetchMetadata::Filtered { unsafe_, .. } => unsafe_,
+                })
+            },
+            FetchResponseMsg::ProcessResponseChunk(data) => buf.extend_from_slice(&data),
+            FetchResponseMsg::ProcessResponseEOF(Ok(_)) => {
+                let metadata = metadata.unwrap();
+                if let Some(timing) = &metadata.timing {
+                    submit_timing_data(global, url, InitiatorType::Other, &timing);
+                }
+                return Ok((metadata, buf));
+            },
+            FetchResponseMsg::ProcessResponse(Err(e)) |
+            FetchResponseMsg::ProcessResponseEOF(Err(e)) => return Err(e),
+        }
+    }
 }

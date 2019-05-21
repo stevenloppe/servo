@@ -147,26 +147,9 @@ def copy_dependencies(binary_path, lib_path):
 
 
 def copy_windows_dependencies(binary_path, destination):
-    deps = [
-        "libcryptoMD.dll",
-        "libsslMD.dll",
-    ]
-    for d in deps:
-        shutil.copy(path.join(binary_path, d), destination)
-
-    # Search for the generated nspr4.dll
-    build_path = path.join(binary_path, "build")
-    nspr4 = "nspr4.dll"
-    nspr4_path = None
-    for root, dirs, files in os.walk(build_path):
-        if nspr4 in files:
-            nspr4_path = path.join(root, nspr4)
-            break
-
-    if nspr4_path is None:
-        print("WARNING: could not find nspr4.dll")
-    else:
-        shutil.copy(nspr4_path, destination)
+    for f in os.listdir(binary_path):
+        if os.path.isfile(path.join(binary_path, f)) and f.endswith(".dll"):
+            shutil.copy(path.join(binary_path, f), destination)
 
 
 def change_prefs(resources_path, platform, vr=False):
@@ -230,6 +213,11 @@ class PackageCommands(CommandBase):
             android = self.handle_android_target(target)
         else:
             target = self.config["android"]["target"]
+        if target and magicleap:
+            print("Please specify either --target or --magicleap.")
+            sys.exit(1)
+        if magicleap:
+            target = "aarch64-linux-android"
         env = self.build_env(target=target)
         binary_path = self.get_binary_path(release, dev, android=android, magicleap=magicleap)
         dir_to_root = self.get_top_dir()
@@ -251,9 +239,6 @@ class PackageCommands(CommandBase):
                 mabu,
                 "-o", target_dir,
                 "-t", build_type,
-                # Servo SEGVs if we don't set the debuggable flag in the mpk's taildata
-                # https://github.com/servo/servo/issues/22188
-                "--add-tail-data-args=--debuggable",
                 package
             ]
             try:
@@ -397,11 +382,10 @@ class PackageCommands(CommandBase):
 
             print("Copying files")
             dir_to_temp = path.join(dir_to_msi, 'temp')
-            dir_to_temp_servo = path.join(dir_to_temp, 'servo')
-            dir_to_resources = path.join(dir_to_temp_servo, 'resources')
+            dir_to_resources = path.join(dir_to_temp, 'resources')
             shutil.copytree(path.join(dir_to_root, 'resources'), dir_to_resources)
-            shutil.copy(binary_path, dir_to_temp_servo)
-            copy_windows_dependencies(target_dir, dir_to_temp_servo)
+            shutil.copy(binary_path, dir_to_temp)
+            copy_windows_dependencies(target_dir, dir_to_temp)
 
             change_prefs(dir_to_resources, "windows")
 
@@ -412,7 +396,7 @@ class PackageCommands(CommandBase):
             wxs_path = path.join(dir_to_msi, "Installer.wxs")
             open(wxs_path, "w").write(template.render(
                 exe_path=target_dir,
-                dir_to_temp=dir_to_temp_servo,
+                dir_to_temp=dir_to_temp,
                 resources_path=dir_to_resources))
 
             # run candle and light
@@ -433,14 +417,7 @@ class PackageCommands(CommandBase):
             dir_to_installer = path.join(dir_to_msi, "Installer.msi")
             print("Packaged Servo into " + dir_to_installer)
 
-            # Download GStreamer installer. Only once.
-            gstreamer_msi_path = path.join(dir_to_msi, 'Gstreamer.msi')
-            if not os.path.exists(gstreamer_msi_path):
-                print('Fetching GStreamer installer. This may take a while...')
-                gstreamer_url = 'https://gstreamer.freedesktop.org/data/pkg/windows/1.14.2/gstreamer-1.0-x86-1.14.2.msi'
-                urllib.urlretrieve(gstreamer_url, gstreamer_msi_path)
-
-            # Generate bundle with GStreamer and Servo installers.
+            # Generate bundle with Servo installer.
             print("Creating bundle")
             shutil.copy(path.join(dir_to_root, 'support', 'windows', 'Servo.wxs'), dir_to_msi)
             bundle_wxs_path = path.join(dir_to_msi, 'Servo.wxs')
@@ -457,11 +434,12 @@ class PackageCommands(CommandBase):
             except subprocess.CalledProcessError as e:
                 print("WiX light exited with return value %d" % e.returncode)
                 return e.returncode
-            print("Packaged Servo into " + path.join(dir_to_msi, "Servo.msi"))
+            print("Packaged Servo into " + path.join(dir_to_msi, "Servo.exe"))
 
             print("Creating ZIP")
-            shutil.make_archive(path.join(dir_to_msi, "Servo"), "zip", dir_to_temp)
-            print("Packaged Servo into " + path.join(dir_to_msi, "Servo.zip"))
+            zip_path = path.join(dir_to_msi, "Servo.zip")
+            archive_deterministically(dir_to_temp, zip_path, prepend_path='servo/')
+            print("Packaged Servo into " + zip_path)
 
             print("Cleaning up")
             delete(dir_to_temp)
@@ -561,8 +539,28 @@ class PackageCommands(CommandBase):
     @CommandArgument('platform',
                      choices=PACKAGES.keys(),
                      help='Package platform type to upload')
-    def upload_nightly(self, platform):
+    @CommandArgument('--secret-from-taskcluster',
+                     action='store_true',
+                     help='Retrieve the appropriate secrets from taskcluster.')
+    def upload_nightly(self, platform, secret_from_taskcluster):
         import boto3
+
+        def get_taskcluster_secret(name):
+            url = (
+                os.environ.get("TASKCLUSTER_PROXY_URL", "http://taskcluster") +
+                "/secrets/v1/secret/project/servo/" +
+                name
+            )
+            return json.load(urllib.urlopen(url))["secret"]
+
+        def get_s3_secret():
+            aws_access_key = None
+            aws_secret_access_key = None
+            if secret_from_taskcluster:
+                secret = get_taskcluster_secret("s3-upload-credentials")
+                aws_access_key = secret["aws_access_key_id"]
+                aws_secret_access_key = secret["aws_secret_access_key"]
+            return (aws_access_key, aws_secret_access_key)
 
         def nightly_filename(package, timestamp):
             return '{}-{}'.format(
@@ -571,7 +569,12 @@ class PackageCommands(CommandBase):
             )
 
         def upload_to_s3(platform, package, timestamp):
-            s3 = boto3.client('s3')
+            (aws_access_key, aws_secret_access_key) = get_s3_secret()
+            s3 = boto3.client(
+                's3',
+                aws_access_key_id=aws_access_key,
+                aws_secret_access_key=aws_secret_access_key
+            )
             BUCKET = 'servo-builds'
 
             nightly_dir = 'nightly/{}'.format(platform)
@@ -588,7 +591,12 @@ class PackageCommands(CommandBase):
             s3.copy(copy_source, BUCKET, latest_upload_key)
 
         def update_maven(directory):
-            s3 = boto3.client('s3')
+            (aws_access_key, aws_secret_access_key) = get_s3_secret()
+            s3 = boto3.client(
+                's3',
+                aws_access_key_id=aws_access_key,
+                aws_secret_access_key=aws_secret_access_key
+            )
             BUCKET = 'servo-builds'
 
             nightly_dir = 'nightly/maven'
@@ -649,13 +657,18 @@ class PackageCommands(CommandBase):
                     '--message=Version Bump: {}'.format(brew_version),
                 ])
 
+                if secret_from_taskcluster:
+                    token = get_taskcluster_secret('github-homebrew-token')["token"]
+                else:
+                    token = os.environ['GITHUB_HOMEBREW_TOKEN']
+
                 push_url = 'https://{}@github.com/servo/homebrew-servo.git'
                 # TODO(aneeshusa): Use subprocess.DEVNULL with Python 3.3+
                 with open(os.devnull, 'wb') as DEVNULL:
                     call_git([
                         'push',
                         '-qf',
-                        push_url.format(os.environ['GITHUB_HOMEBREW_TOKEN']),
+                        push_url.format(token),
                         'master',
                     ], stdout=DEVNULL, stderr=DEVNULL)
 

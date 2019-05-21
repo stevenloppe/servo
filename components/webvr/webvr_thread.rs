@@ -5,16 +5,18 @@
 use canvas_traits::webgl;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use euclid::Size2D;
+use gleam::gl::Gl;
 use ipc_channel::ipc;
 use ipc_channel::ipc::{IpcReceiver, IpcSender};
 use msg::constellation_msg::PipelineId;
 use rust_webvr::VRServiceManager;
 use script_traits::ConstellationMsg;
-use servo_config::prefs::PREFS;
+use servo_config::pref;
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::{thread, time};
 use webvr_traits::webvr::*;
-use webvr_traits::{WebVRMsg, WebVRResult};
+use webvr_traits::{WebVRMsg, WebVRPoseInformation, WebVRResult};
 
 /// WebVRThread owns native VRDisplays, handles their life cycle inside Servo and
 /// acts a doorman for untrusted VR requests from DOM Objects. These are the key components
@@ -52,9 +54,8 @@ impl WebVRThread {
         sender: IpcSender<WebVRMsg>,
         constellation_chan: Sender<ConstellationMsg>,
         vr_compositor_chan: WebVRCompositorSender,
+        service: VRServiceManager,
     ) -> WebVRThread {
-        let mut service = VRServiceManager::new();
-        service.register_defaults();
         WebVRThread {
             receiver: receiver,
             sender: sender,
@@ -69,6 +70,7 @@ impl WebVRThread {
 
     pub fn spawn(
         vr_compositor_chan: WebVRCompositorSender,
+        service: VRServiceManager,
     ) -> (IpcSender<WebVRMsg>, Sender<Sender<ConstellationMsg>>) {
         let (sender, receiver) = ipc::channel().unwrap();
         let (constellation_sender, constellation_receiver) = unbounded();
@@ -82,6 +84,7 @@ impl WebVRThread {
                     sender_clone,
                     constellation_chan,
                     vr_compositor_chan,
+                    service,
                 )
                 .start();
             })
@@ -125,6 +128,9 @@ impl WebVRThread {
                 WebVRMsg::GetGamepads(synced_ids, sender) => {
                     self.handle_get_gamepads(synced_ids, sender);
                 },
+                WebVRMsg::GetGamepadsForDisplay(display_id, sender) => {
+                    self.handle_get_gamepads_for_display(display_id, sender);
+                },
                 WebVRMsg::Exit => break,
             }
         }
@@ -157,7 +163,7 @@ impl WebVRThread {
     ) {
         match self.access_check(pipeline, display_id) {
             Ok(display) => sender
-                .send(Ok(display.borrow().inmediate_frame_data(near, far)))
+                .send(Ok(display.borrow().immediate_frame_data(near, far)))
                 .unwrap(),
             Err(msg) => sender.send(Err(msg.into())).unwrap(),
         }
@@ -248,6 +254,32 @@ impl WebVRThread {
         self.vr_compositor_chan.send(compositor).unwrap();
     }
 
+    fn handle_get_gamepads_for_display(
+        &mut self,
+        display_id: u32,
+        sender: IpcSender<WebVRResult<Vec<(VRGamepadData, VRGamepadState)>>>,
+    ) {
+        match self.service.get_display(display_id) {
+            Some(display) => {
+                let gamepads = display.borrow_mut().fetch_gamepads();
+                match gamepads {
+                    Ok(gamepads) => {
+                        let data = gamepads
+                            .iter()
+                            .map(|g| {
+                                let g = g.borrow();
+                                (g.data(), g.state())
+                            })
+                            .collect();
+                        sender.send(Ok(data)).unwrap();
+                    },
+                    Err(e) => sender.send(Err(e)).unwrap(),
+                }
+            },
+            None => sender.send(Err("Device not found".into())).unwrap(),
+        }
+    }
+
     fn handle_get_gamepads(
         &mut self,
         synced_ids: Vec<u32>,
@@ -305,10 +337,7 @@ impl WebVRThread {
         let (sender, receiver) = ipc::channel().unwrap();
 
         // Defines the polling interval time in ms for VR Events such as VRDisplay connected, disconnected, etc.
-        let polling_interval: u64 = PREFS
-            .get("dom.webvr.event_polling_interval")
-            .as_u64()
-            .unwrap_or(500);
+        let polling_interval = pref!(dom.webvr.event_polling_interval) as u64;
 
         thread::Builder::new()
             .name("WebVRPollEvents".into())
@@ -374,18 +403,35 @@ impl WebVRCompositorHandler {
 
 impl webgl::WebVRRenderHandler for WebVRCompositorHandler {
     #[allow(unsafe_code)]
-    fn handle(&mut self, cmd: webgl::WebVRCommand, texture: Option<(u32, Size2D<i32>)>) {
+    fn handle(
+        &mut self,
+        gl: &dyn Gl,
+        cmd: webgl::WebVRCommand,
+        texture: Option<(u32, Size2D<i32>)>,
+    ) {
         match cmd {
             webgl::WebVRCommand::Create(compositor_id) => {
-                self.create_compositor(compositor_id);
+                if let Some(compositor) = self.create_compositor(compositor_id) {
+                    unsafe { (*compositor.0).start_present(None) };
+                }
             },
-            webgl::WebVRCommand::SyncPoses(compositor_id, near, far, sender) => {
+            webgl::WebVRCommand::SyncPoses(compositor_id, near, far, get_gamepads, sender) => {
                 if let Some(compositor) = self.compositors.get(&compositor_id) {
-                    let pose = unsafe {
-                        (*compositor.0).sync_poses();
-                        (*compositor.0).synced_frame_data(near, far).to_bytes()
+                    let pose = unsafe { (*compositor.0).future_frame_data(near, far) };
+                    let mut pose_information = WebVRPoseInformation {
+                        frame: pose,
+                        gamepads: vec![],
                     };
-                    let _ = sender.send(Ok(pose.into()));
+                    if get_gamepads {
+                        let gamepads = unsafe { (*compositor.0).fetch_gamepads() };
+                        if let Ok(gamepads) = gamepads {
+                            for gamepad in gamepads {
+                                let g = gamepad.borrow();
+                                pose_information.gamepads.push((g.id(), g.state()));
+                            }
+                        }
+                    }
+                    let _ = sender.send(Ok(pose_information));
                 } else {
                     let _ = sender.send(Err(()));
                 }
@@ -399,15 +445,14 @@ impl webgl::WebVRRenderHandler for WebVRCompositorHandler {
                             right_bounds: right_bounds,
                             texture_size: Some((size.width as u32, size.height as u32)),
                         };
-                        unsafe {
-                            (*compositor.0).render_layer(&layer);
-                            (*compositor.0).submit_frame();
-                        }
+                        unsafe { (*compositor.0).submit_layer(gl, &layer) };
                     }
                 }
             },
             webgl::WebVRCommand::Release(compositor_id) => {
-                self.compositors.remove(&compositor_id);
+                if let Some(compositor) = self.compositors.remove(&compositor_id) {
+                    unsafe { (*compositor.0).stop_present() };
+                }
             },
         }
     }
@@ -415,10 +460,13 @@ impl webgl::WebVRRenderHandler for WebVRCompositorHandler {
 
 impl WebVRCompositorHandler {
     #[allow(unsafe_code)]
-    fn create_compositor(&mut self, display_id: webgl::WebVRDeviceId) {
+    fn create_compositor(
+        &mut self,
+        display_id: webgl::WebVRDeviceId,
+    ) -> Option<&mut WebVRCompositor> {
         let sender = match self.webvr_thread_sender {
             Some(ref s) => s,
-            None => return,
+            None => return None,
         };
 
         sender
@@ -427,13 +475,14 @@ impl WebVRCompositorHandler {
         let display = self.webvr_thread_receiver.recv().unwrap();
 
         match display {
-            Some(display) => {
-                self.compositors.insert(display_id, display);
+            Some(display) => match self.compositors.entry(display_id) {
+                Entry::Vacant(entry) => return Some(entry.insert(display)),
+                Entry::Occupied(_) => error!("VRDisplay already presenting"),
             },
-            None => {
-                error!("VRDisplay not found when creating a new VRCompositor");
-            },
+            None => error!("VRDisplay not found when creating a new VRCompositor"),
         };
+
+        None
     }
 
     // This is done on only a per-platform basis on initialization.

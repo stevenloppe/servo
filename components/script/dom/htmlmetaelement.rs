@@ -8,20 +8,23 @@ use crate::dom::bindings::codegen::Bindings::HTMLMetaElementBinding;
 use crate::dom::bindings::codegen::Bindings::HTMLMetaElementBinding::HTMLMetaElementMethods;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::root::{DomRoot, MutNullableDom, RootedReference};
+use crate::dom::bindings::root::{DomRoot, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::cssstylesheet::CSSStyleSheet;
 use crate::dom::document::Document;
 use crate::dom::element::{AttributeMutation, Element};
 use crate::dom::htmlelement::HTMLElement;
 use crate::dom::htmlheadelement::HTMLHeadElement;
-use crate::dom::node::{document_from_node, window_from_node, Node, UnbindContext};
+use crate::dom::node::{
+    document_from_node, stylesheets_owner_from_node, window_from_node, BindContext, Node,
+    UnbindContext,
+};
 use crate::dom::virtualmethods::VirtualMethods;
 use dom_struct::dom_struct;
 use html5ever::{LocalName, Prefix};
 use parking_lot::RwLock;
 use servo_arc::Arc;
-use servo_config::prefs::PREFS;
+use servo_config::pref;
 use std::sync::atomic::AtomicBool;
 use style::attr::AttrValue;
 use style::media_queries::MediaList;
@@ -83,7 +86,7 @@ impl HTMLMetaElement {
 
     fn process_attributes(&self) {
         let element = self.upcast::<Element>();
-        if let Some(name) = element.get_attribute(&ns!(), &local_name!("name")).r() {
+        if let Some(ref name) = element.get_attribute(&ns!(), &local_name!("name")) {
             let name = name.value().to_ascii_lowercase();
             let name = name.trim_matches(HTML_SPACE_CHARACTERS);
 
@@ -97,19 +100,17 @@ impl HTMLMetaElement {
         }
     }
 
+    #[allow(unrooted_must_root)]
     fn apply_viewport(&self) {
-        if !PREFS
-            .get("layout.viewport.enabled")
-            .as_boolean()
-            .unwrap_or(false)
-        {
+        if !pref!(layout.viewport.enabled) {
             return;
         }
         let element = self.upcast::<Element>();
-        if let Some(content) = element.get_attribute(&ns!(), &local_name!("content")).r() {
+        if let Some(ref content) = element.get_attribute(&ns!(), &local_name!("content")) {
             let content = content.value();
             if !content.is_empty() {
                 if let Some(translated_rule) = ViewportRule::from_meta(&**content) {
+                    let stylesheets_owner = stylesheets_owner_from_node(self);
                     let document = document_from_node(self);
                     let shared_lock = document.style_shared_lock();
                     let rule = CssRule::Viewport(Arc::new(shared_lock.wrap(translated_rule)));
@@ -128,7 +129,7 @@ impl HTMLMetaElement {
                         disabled: AtomicBool::new(false),
                     });
                     *self.stylesheet.borrow_mut() = Some(sheet.clone());
-                    document.add_stylesheet(self.upcast(), sheet);
+                    stylesheets_owner.add_stylesheet(self.upcast(), sheet);
                 }
             }
         }
@@ -136,7 +137,7 @@ impl HTMLMetaElement {
 
     fn process_referrer_attribute(&self) {
         let element = self.upcast::<Element>();
-        if let Some(name) = element.get_attribute(&ns!(), &local_name!("name")).r() {
+        if let Some(ref name) = element.get_attribute(&ns!(), &local_name!("name")) {
             let name = name.value().to_ascii_lowercase();
             let name = name.trim_matches(HTML_SPACE_CHARACTERS);
 
@@ -175,12 +176,12 @@ impl VirtualMethods for HTMLMetaElement {
         Some(self.upcast::<HTMLElement>() as &dyn VirtualMethods)
     }
 
-    fn bind_to_tree(&self, tree_in_doc: bool) {
+    fn bind_to_tree(&self, context: &BindContext) {
         if let Some(ref s) = self.super_type() {
-            s.bind_to_tree(tree_in_doc);
+            s.bind_to_tree(context);
         }
 
-        if tree_in_doc {
+        if context.tree_connected {
             self.process_attributes();
         }
     }
@@ -208,11 +209,11 @@ impl VirtualMethods for HTMLMetaElement {
             s.unbind_from_tree(context);
         }
 
-        if context.tree_in_doc {
+        if context.tree_connected {
             self.process_referrer_attribute();
 
             if let Some(s) = self.stylesheet.borrow_mut().take() {
-                document_from_node(self).remove_stylesheet(self.upcast(), &s);
+                stylesheets_owner_from_node(self).remove_stylesheet(self.upcast(), &s);
             }
         }
     }

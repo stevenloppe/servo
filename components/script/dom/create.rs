@@ -5,9 +5,11 @@
 use crate::dom::bindings::error::{report_pending_exception, throw_dom_exception};
 use crate::dom::bindings::reflector::DomObject;
 use crate::dom::bindings::root::DomRoot;
-use crate::dom::customelementregistry::{is_valid_custom_element_name, upgrade_element};
+use crate::dom::customelementregistry::{
+    is_valid_custom_element_name, upgrade_element, CustomElementState,
+};
 use crate::dom::document::Document;
-use crate::dom::element::{CustomElementCreationMode, CustomElementState, Element, ElementCreator};
+use crate::dom::element::{CustomElementCreationMode, Element, ElementCreator};
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::htmlanchorelement::HTMLAnchorElement;
 use crate::dom::htmlareaelement::HTMLAreaElement;
@@ -80,8 +82,8 @@ use crate::dom::htmlvideoelement::HTMLVideoElement;
 use crate::dom::svgsvgelement::SVGSVGElement;
 use crate::script_thread::ScriptThread;
 use html5ever::{LocalName, Prefix, QualName};
-use js::jsapi::JSAutoCompartment;
-use servo_config::prefs::PREFS;
+use js::jsapi::JSAutoRealm;
+use servo_config::pref;
 
 fn create_svg_element(
     name: QualName,
@@ -101,7 +103,7 @@ fn create_svg_element(
         })
     );
 
-    if !PREFS.get("dom.svg.enabled").as_boolean().unwrap_or(false) {
+    if !pref!(dom.svg.enabled) {
         return Element::new(name.local, name.ns, prefix, document);
     }
 
@@ -154,10 +156,8 @@ fn create_html_element(
 
                             // Step 6.1.1
                             unsafe {
-                                let _ac = JSAutoCompartment::new(
-                                    cx,
-                                    global.reflector().get_jsobject().get(),
-                                );
+                                let _ac =
+                                    JSAutoRealm::new(cx, global.reflector().get_jsobject().get());
                                 throw_dom_exception(cx, &global, error);
                                 report_pending_exception(cx, true);
                             }

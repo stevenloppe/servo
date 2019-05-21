@@ -72,8 +72,8 @@ use crate::dom::bindings::conversions::DerivedFrom;
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::create::create_native_html_element;
-use crate::dom::customelementregistry::ConstructionStackEntry;
-use crate::dom::element::{CustomElementState, Element, ElementCreator};
+use crate::dom::customelementregistry::{ConstructionStackEntry, CustomElementState};
+use crate::dom::element::{Element, ElementCreator};
 use crate::dom::htmlelement::HTMLElement;
 use crate::dom::window::Window;
 use crate::script_thread::ScriptThread;
@@ -81,7 +81,7 @@ use html5ever::interface::QualName;
 use html5ever::LocalName;
 use js::glue::UnwrapObject;
 use js::jsapi::{CallArgs, CurrentGlobalOrNull};
-use js::jsapi::{JSAutoCompartment, JSContext, JSObject};
+use js::jsapi::{JSAutoRealm, JSContext, JSObject};
 use js::rust::HandleObject;
 use js::rust::MutableHandleObject;
 use std::ptr;
@@ -115,7 +115,7 @@ where
     }
 
     {
-        let _ac = JSAutoCompartment::new(window.get_cx(), callee.get());
+        let _ac = JSAutoRealm::new(window.get_cx(), callee.get());
         rooted!(in(window.get_cx()) let mut constructor = ptr::null_mut::<JSObject>());
         rooted!(in(window.get_cx()) let global_object = CurrentGlobalOrNull(window.get_cx()));
 

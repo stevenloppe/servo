@@ -81,6 +81,8 @@ interface Element : Node {
   void insertAdjacentText(DOMString where_, DOMString data);
   [CEReactions, Throws]
   void insertAdjacentHTML(DOMString position, DOMString html);
+
+  [Throws, Pref="dom.shadowdom.enabled"] ShadowRoot attachShadow();
 };
 
 // http://dev.w3.org/csswg/cssom-view/#extensions-to-the-element-interface
@@ -109,10 +111,10 @@ partial interface Element {
 
 // https://w3c.github.io/DOM-Parsing/#extensions-to-the-element-interface
 partial interface Element {
-  [CEReactions, Throws,TreatNullAs=EmptyString]
-  attribute DOMString innerHTML;
-  [CEReactions, Throws,TreatNullAs=EmptyString]
-  attribute DOMString outerHTML;
+  [CEReactions, Throws]
+  attribute [TreatNullAs=EmptyString] DOMString innerHTML;
+  [CEReactions, Throws]
+  attribute [TreatNullAs=EmptyString] DOMString outerHTML;
 };
 
 // https://fullscreen.spec.whatwg.org/#api

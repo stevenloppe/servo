@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use crate::compartments::{AlreadyInCompartment, InCompartment};
 use crate::dom::baseaudiocontext::{BaseAudioContext, BaseAudioContextOptions};
 use crate::dom::bindings::codegen::Bindings::AudioContextBinding;
 use crate::dom::bindings::codegen::Bindings::AudioContextBinding::{
@@ -109,7 +110,11 @@ impl AudioContextMethods for AudioContext {
     // https://webaudio.github.io/web-audio-api/#dom-audiocontext-suspend
     fn Suspend(&self) -> Rc<Promise> {
         // Step 1.
-        let promise = Promise::new(&self.global());
+        let in_compartment_proof = AlreadyInCompartment::assert(&self.global());
+        let promise = Promise::new_in_current_compartment(
+            &self.global(),
+            InCompartment::Already(&in_compartment_proof),
+        );
 
         // Step 2.
         if self.context.control_thread_state() == ProcessingState::Closed {
@@ -170,7 +175,11 @@ impl AudioContextMethods for AudioContext {
     // https://webaudio.github.io/web-audio-api/#dom-audiocontext-close
     fn Close(&self) -> Rc<Promise> {
         // Step 1.
-        let promise = Promise::new(&self.global());
+        let in_compartment_proof = AlreadyInCompartment::assert(&self.global());
+        let promise = Promise::new_in_current_compartment(
+            &self.global(),
+            InCompartment::Already(&in_compartment_proof),
+        );
 
         // Step 2.
         if self.context.control_thread_state() == ProcessingState::Closed {

@@ -1175,18 +1175,6 @@ const gCSSProperties = {
       { type: 'discrete', options: [ [ 'auto', 'smooth' ] ] }
     ]
   },
-  'scroll-snap-type-x': {
-    // https://developer.mozilla.org/en/docs/Web/CSS/scroll-snap-type-x
-    types: [
-      { type: 'discrete', options: [ [ 'mandatory', 'proximity' ] ] }
-    ]
-  },
-  'scroll-snap-type-y': {
-    // https://developer.mozilla.org/en/docs/Web/CSS/scroll-snap-type-y
-    types: [
-      { type: 'discrete', options: [ [ 'mandatory', 'proximity' ] ] }
-    ]
-  },
   'shape-outside': {
     // http://dev.w3.org/csswg/css-shapes/#propdef-shape-outside
     types: [
@@ -1218,7 +1206,7 @@ const gCSSProperties = {
     // https://svgwg.org/svg2-draft/painting.html#StrokeDasharrayProperty
     types: [
       'dasharray',
-      { type: 'discrete', options: [ [ 'none', '10, 20' ] ] }
+      { type: 'discrete', options: [ [ 'none', '10px, 20px' ] ] }
     ]
   },
   'stroke-dashoffset': {
@@ -1445,7 +1433,7 @@ const gCSSProperties = {
 function testAnimationSamples(animation, idlName, testSamples) {
   const type = animation.effect.target.type;
   const target = animation.effect.target.constructor.name === 'CSSPseudoElement'
-                 ? animation.effect.target.parentElement
+                 ? animation.effect.target.element
                  : animation.effect.target;
   for (const testSample of testSamples) {
     animation.currentTime = testSample.time;
@@ -1466,7 +1454,7 @@ function toOrderedArray(string) {
 function testAnimationSamplesWithAnyOrder(animation, idlName, testSamples) {
   const type = animation.effect.target.type;
   const target = animation.effect.target.constructor.name === 'CSSPseudoElement'
-                 ? animation.effect.target.parentElement
+                 ? animation.effect.target.element
                  : animation.effect.target;
   for (const testSample of testSamples) {
     animation.currentTime = testSample.time;

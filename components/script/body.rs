@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use crate::compartments::{AlreadyInCompartment, InCompartment};
 use crate::dom::bindings::codegen::Bindings::FormDataBinding::FormDataMethods;
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::reflector::DomObject;
@@ -50,7 +51,11 @@ pub enum FetchedData {
 // https://fetch.spec.whatwg.org/#concept-body-consume-body
 #[allow(unrooted_must_root)]
 pub fn consume_body<T: BodyOperations + DomObject>(object: &T, body_type: BodyType) -> Rc<Promise> {
-    let promise = Promise::new(&object.global());
+    let in_compartment_proof = AlreadyInCompartment::assert(&object.global());
+    let promise = Promise::new_in_current_compartment(
+        &object.global(),
+        InCompartment::Already(&in_compartment_proof),
+    );
 
     // Step 1
     if object.get_body_used() || object.is_locked() {

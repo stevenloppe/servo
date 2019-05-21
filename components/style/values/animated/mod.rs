@@ -16,7 +16,6 @@ use crate::values::computed::Image;
 use crate::values::specified::SVGPathData;
 use crate::values::CSSFloat;
 use app_units::Au;
-use euclid::{Point2D, Size2D};
 use smallvec::SmallVec;
 use std::cmp;
 
@@ -241,29 +240,10 @@ impl Animate for Au {
     }
 }
 
-impl<T> Animate for Size2D<T>
-where
-    T: Animate,
-{
+impl<T: Animate> Animate for Box<T> {
     #[inline]
     fn animate(&self, other: &Self, procedure: Procedure) -> Result<Self, ()> {
-        Ok(Size2D::new(
-            self.width.animate(&other.width, procedure)?,
-            self.height.animate(&other.height, procedure)?,
-        ))
-    }
-}
-
-impl<T> Animate for Point2D<T>
-where
-    T: Animate,
-{
-    #[inline]
-    fn animate(&self, other: &Self, procedure: Procedure) -> Result<Self, ()> {
-        Ok(Point2D::new(
-            self.x.animate(&other.x, procedure)?,
-            self.y.animate(&other.y, procedure)?,
-        ))
+        Ok(Box::new((**self).animate(&other, procedure)?))
     }
 }
 
@@ -298,6 +278,66 @@ where
     #[inline]
     fn from_animated_value(animated: Self::AnimatedValue) -> Self {
         animated.into_iter().map(T::from_animated_value).collect()
+    }
+}
+
+impl<T> ToAnimatedValue for Box<T>
+where
+    T: ToAnimatedValue,
+{
+    type AnimatedValue = Box<<T as ToAnimatedValue>::AnimatedValue>;
+
+    #[inline]
+    fn to_animated_value(self) -> Self::AnimatedValue {
+        Box::new((*self).to_animated_value())
+    }
+
+    #[inline]
+    fn from_animated_value(animated: Self::AnimatedValue) -> Self {
+        Box::new(T::from_animated_value(*animated))
+    }
+}
+
+impl<T> ToAnimatedValue for Box<[T]>
+where
+    T: ToAnimatedValue,
+{
+    type AnimatedValue = Box<[<T as ToAnimatedValue>::AnimatedValue]>;
+
+    #[inline]
+    fn to_animated_value(self) -> Self::AnimatedValue {
+        self.into_vec()
+            .into_iter()
+            .map(T::to_animated_value)
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
+    }
+
+    #[inline]
+    fn from_animated_value(animated: Self::AnimatedValue) -> Self {
+        animated
+            .into_vec()
+            .into_iter()
+            .map(T::from_animated_value)
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
+    }
+}
+
+impl<T> ToAnimatedValue for crate::OwnedSlice<T>
+where
+    T: ToAnimatedValue,
+{
+    type AnimatedValue = crate::OwnedSlice<<T as ToAnimatedValue>::AnimatedValue>;
+
+    #[inline]
+    fn to_animated_value(self) -> Self::AnimatedValue {
+        self.into_box().to_animated_value().into()
+    }
+
+    #[inline]
+    fn from_animated_value(animated: Self::AnimatedValue) -> Self {
+        Self::from(Box::from_animated_value(animated.into_box()))
     }
 }
 
@@ -397,16 +437,13 @@ where
     }
 }
 
-impl<T> ToAnimatedZero for Size2D<T>
+impl<T> ToAnimatedZero for Vec<T>
 where
     T: ToAnimatedZero,
 {
     #[inline]
     fn to_animated_zero(&self) -> Result<Self, ()> {
-        Ok(Size2D::new(
-            self.width.to_animated_zero()?,
-            self.height.to_animated_zero()?,
-        ))
+        self.iter().map(|v| v.to_animated_zero()).collect()
     }
 }
 
@@ -421,5 +458,19 @@ where
             .map(|v| v.to_animated_zero())
             .collect::<Result<Vec<_>, _>>()?;
         Ok(v.into_boxed_slice())
+    }
+}
+
+impl<T> ToAnimatedZero for crate::ArcSlice<T>
+where
+    T: ToAnimatedZero,
+{
+    #[inline]
+    fn to_animated_zero(&self) -> Result<Self, ()> {
+        let v = self
+            .iter()
+            .map(|v| v.to_animated_zero())
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(crate::ArcSlice::from_iter(v.into_iter()))
     }
 }

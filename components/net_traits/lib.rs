@@ -18,7 +18,7 @@ extern crate serde;
 extern crate url;
 
 use crate::filemanager_thread::FileManagerThreadMsg;
-use crate::request::{Request, RequestInit};
+use crate::request::{Request, RequestBuilder};
 use crate::response::{HttpsState, Response, ResponseInit};
 use crate::storage_thread::StorageThreadMsg;
 use cookie::Cookie;
@@ -377,10 +377,10 @@ pub enum FetchChannels {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub enum CoreResourceMsg {
-    Fetch(RequestInit, FetchChannels),
+    Fetch(RequestBuilder, FetchChannels),
     /// Initiate a fetch in response to processing a redirection
     FetchRedirect(
-        RequestInit,
+        RequestBuilder,
         ResponseInit,
         IpcSender<FetchResponseMsg>,
         /* cancel_chan */ Option<IpcReceiver<()>>,
@@ -397,6 +397,7 @@ pub enum CoreResourceMsg {
         IpcSender<Vec<Serde<Cookie<'static>>>>,
         CookieSource,
     ),
+    DeleteCookies(ServoUrl),
     /// Get a history state by a given history state id
     GetHistoryState(HistoryStateId, IpcSender<Option<Vec<u8>>>),
     /// Set a history state for a given history state id
@@ -415,7 +416,7 @@ pub enum CoreResourceMsg {
 }
 
 /// Instruct the resource thread to make a new request.
-pub fn fetch_async<F>(request: RequestInit, core_resource_thread: &CoreResourceThread, f: F)
+pub fn fetch_async<F>(request: RequestBuilder, core_resource_thread: &CoreResourceThread, f: F)
 where
     F: Fn(FetchResponseMsg) + Send + 'static,
 {
@@ -448,18 +449,28 @@ pub struct ResourceFetchTiming {
     pub request_start: u64,
     pub response_start: u64,
     pub fetch_start: u64,
-    // pub response_end: u64,
-    // pub redirect_start: u64,
+    pub response_end: u64,
+    pub redirect_start: u64,
     // pub redirect_end: u64,
-    // pub connect_start: u64,
-    // pub connect_end: u64,
+    pub connect_start: u64,
+    pub connect_end: u64,
+}
+
+pub enum RedirectStartValue {
+    #[allow(dead_code)]
+    Zero,
+    FetchStart,
 }
 
 pub enum ResourceAttribute {
     RedirectCount(u16),
     RequestStart,
     ResponseStart,
+    RedirectStart(RedirectStartValue),
     FetchStart,
+    ConnectStart(u64),
+    ConnectEnd(u64),
+    ResponseEnd,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, MallocSizeOf, PartialEq, Serialize)]
@@ -478,6 +489,10 @@ impl ResourceFetchTiming {
             request_start: 0,
             response_start: 0,
             fetch_start: 0,
+            redirect_start: 0,
+            connect_start: 0,
+            connect_end: 0,
+            response_end: 0,
         }
     }
 
@@ -488,7 +503,18 @@ impl ResourceFetchTiming {
             ResourceAttribute::RedirectCount(count) => self.redirect_count = count,
             ResourceAttribute::RequestStart => self.request_start = precise_time_ns(),
             ResourceAttribute::ResponseStart => self.response_start = precise_time_ns(),
+            ResourceAttribute::RedirectStart(val) => match val {
+                RedirectStartValue::Zero => self.redirect_start = 0,
+                RedirectStartValue::FetchStart => {
+                    if self.redirect_start == 0 {
+                        self.redirect_start = self.fetch_start
+                    }
+                },
+            },
             ResourceAttribute::FetchStart => self.fetch_start = precise_time_ns(),
+            ResourceAttribute::ConnectStart(val) => self.connect_start = val,
+            ResourceAttribute::ConnectEnd(val) => self.connect_end = val,
+            ResourceAttribute::ResponseEnd => self.response_end = precise_time_ns(),
         }
     }
 }
@@ -572,38 +598,6 @@ pub enum CookieSource {
     HTTP,
     /// A non-HTTP API
     NonHTTP,
-}
-
-/// Convenience function for synchronously loading a whole resource.
-pub fn load_whole_resource(
-    request: RequestInit,
-    core_resource_thread: &CoreResourceThread,
-) -> Result<(Metadata, Vec<u8>), NetworkError> {
-    let (action_sender, action_receiver) = ipc::channel().unwrap();
-    core_resource_thread
-        .send(CoreResourceMsg::Fetch(
-            request,
-            FetchChannels::ResponseMsg(action_sender, None),
-        ))
-        .unwrap();
-
-    let mut buf = vec![];
-    let mut metadata = None;
-    loop {
-        match action_receiver.recv().unwrap() {
-            FetchResponseMsg::ProcessRequestBody | FetchResponseMsg::ProcessRequestEOF => (),
-            FetchResponseMsg::ProcessResponse(Ok(m)) => {
-                metadata = Some(match m {
-                    FetchMetadata::Unfiltered(m) => m,
-                    FetchMetadata::Filtered { unsafe_, .. } => unsafe_,
-                })
-            },
-            FetchResponseMsg::ProcessResponseChunk(data) => buf.extend_from_slice(&data),
-            FetchResponseMsg::ProcessResponseEOF(Ok(_)) => return Ok((metadata.unwrap(), buf)),
-            FetchResponseMsg::ProcessResponse(Err(e)) |
-            FetchResponseMsg::ProcessResponseEOF(Err(e)) => return Err(e),
-        }
-    }
 }
 
 /// Network errors that have to be exported out of the loaders

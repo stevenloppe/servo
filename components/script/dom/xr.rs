@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use crate::compartments::{AlreadyInCompartment, InCompartment};
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::VRDisplayBinding::VRDisplayMethods;
 use crate::dom::bindings::codegen::Bindings::XRBinding;
@@ -10,7 +11,7 @@ use crate::dom::bindings::codegen::Bindings::XRBinding::{XRMethods, XRSessionMod
 use crate::dom::bindings::error::Error;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::{reflect_dom_object, DomObject};
-use crate::dom::bindings::root::{Dom, DomRoot};
+use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::event::Event;
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::gamepad::Gamepad;
@@ -23,6 +24,7 @@ use crate::dom::xrsession::XRSession;
 use dom_struct::dom_struct;
 use ipc_channel::ipc::IpcSender;
 use profile_traits::ipc;
+use std::cell::Cell;
 use std::rc::Rc;
 use webvr_traits::{WebVRDisplayData, WebVRDisplayEvent, WebVREvent, WebVRMsg};
 use webvr_traits::{WebVRGamepadData, WebVRGamepadEvent, WebVRGamepadState};
@@ -32,6 +34,8 @@ pub struct XR {
     eventtarget: EventTarget,
     displays: DomRefCell<Vec<Dom<VRDisplay>>>,
     gamepads: DomRefCell<Vec<Dom<Gamepad>>>,
+    pending_immersive_session: Cell<bool>,
+    active_immersive_session: MutNullableDom<VRDisplay>,
 }
 
 impl XR {
@@ -40,6 +44,8 @@ impl XR {
             eventtarget: EventTarget::new_inherited(),
             displays: DomRefCell::new(Vec::new()),
             gamepads: DomRefCell::new(Vec::new()),
+            pending_immersive_session: Cell::new(false),
+            active_immersive_session: Default::default(),
         }
     }
 
@@ -47,6 +53,26 @@ impl XR {
         let root = reflect_dom_object(Box::new(XR::new_inherited()), global, XRBinding::Wrap);
         root.register();
         root
+    }
+
+    pub fn pending_or_active_session(&self) -> bool {
+        self.pending_immersive_session.get() || self.active_immersive_session.get().is_some()
+    }
+
+    pub fn set_pending(&self) {
+        self.pending_immersive_session.set(true)
+    }
+
+    pub fn set_active_immersive_session(&self, session: &VRDisplay) {
+        // XXXManishearth when we support non-immersive (inline) sessions we should
+        // ensure they never reach these codepaths
+        self.pending_immersive_session.set(false);
+        self.active_immersive_session.set(Some(session))
+    }
+
+    pub fn deactivate_session(&self) {
+        self.pending_immersive_session.set(false);
+        self.active_immersive_session.set(None)
     }
 }
 
@@ -60,7 +86,11 @@ impl XRMethods for XR {
     /// https://immersive-web.github.io/webxr/#dom-xr-supportssessionmode
     fn SupportsSessionMode(&self, mode: XRSessionMode) -> Rc<Promise> {
         // XXXManishearth this should select an XR device first
-        let promise = Promise::new(&self.global());
+        let in_compartment_proof = AlreadyInCompartment::assert(&self.global());
+        let promise = Promise::new_in_current_compartment(
+            &self.global(),
+            InCompartment::Already(&in_compartment_proof),
+        );
         if mode == XRSessionMode::Immersive_vr {
             promise.resolve_native(&());
         } else {
@@ -73,11 +103,22 @@ impl XRMethods for XR {
 
     /// https://immersive-web.github.io/webxr/#dom-xr-requestsession
     fn RequestSession(&self, options: &XRSessionCreationOptions) -> Rc<Promise> {
-        let promise = Promise::new(&self.global());
+        let in_compartment_proof = AlreadyInCompartment::assert(&self.global());
+        let promise = Promise::new_in_current_compartment(
+            &self.global(),
+            InCompartment::Already(&in_compartment_proof),
+        );
         if options.mode != XRSessionMode::Immersive_vr {
             promise.reject_error(Error::NotSupported);
             return promise;
         }
+
+        if self.pending_or_active_session() {
+            promise.reject_error(Error::InvalidState);
+            return promise;
+        }
+        // we set pending immersive session to true further down
+        // to handle rejections in a cleaner way
 
         let displays = self.get_displays();
 
@@ -93,6 +134,8 @@ impl XRMethods for XR {
         if displays.is_empty() {
             promise.reject_error(Error::Security);
         }
+
+        self.set_pending();
 
         let session = XRSession::new(&self.global(), &displays[0]);
         session.xr_present(promise.clone());

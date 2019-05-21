@@ -99,6 +99,9 @@ extern crate style_traits;
 #[cfg(feature = "gecko")]
 extern crate thin_slice;
 extern crate time;
+extern crate to_shmem;
+#[macro_use]
+extern crate to_shmem_derive;
 extern crate uluru;
 extern crate unicode_bidi;
 #[allow(unused_extern_crates)]
@@ -185,6 +188,9 @@ pub use html5ever::Prefix;
 #[cfg(feature = "servo")]
 pub use servo_atoms::Atom;
 
+pub use style_traits::arc_slice::ArcSlice;
+pub use style_traits::owned_slice::OwnedSlice;
+
 /// The CSS properties supported by the style system.
 /// Generated from the properties.mako.rs template by build.rs
 #[macro_use]
@@ -242,5 +248,28 @@ impl CaseSensitivityExt for selectors::attr::CaseSensitivity {
             selectors::attr::CaseSensitivity::CaseSensitive => a == b,
             selectors::attr::CaseSensitivity::AsciiCaseInsensitive => a.eq_ignore_ascii_case(b),
         }
+    }
+}
+
+/// A trait pretty much similar to num_traits::Zero, but without the need of
+/// implementing `Add`.
+pub trait Zero {
+    /// Returns the zero value.
+    fn zero() -> Self;
+
+    /// Returns whether this value is zero.
+    fn is_zero(&self) -> bool;
+}
+
+impl<T> Zero for T
+where
+    T: num_traits::Zero,
+{
+    fn zero() -> Self {
+        <Self as num_traits::Zero>::zero()
+    }
+
+    fn is_zero(&self) -> bool {
+        <Self as num_traits::Zero>::is_zero(self)
     }
 }

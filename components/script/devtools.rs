@@ -15,7 +15,7 @@ use crate::dom::bindings::str::DOMString;
 use crate::dom::document::AnimationFrameCallback;
 use crate::dom::element::Element;
 use crate::dom::globalscope::GlobalScope;
-use crate::dom::node::{window_from_node, Node};
+use crate::dom::node::{window_from_node, Node, ShadowIncluding};
 use crate::dom::window::Window;
 use crate::script_thread::Documents;
 use devtools_traits::TimelineMarkerType;
@@ -23,13 +23,12 @@ use devtools_traits::{AutoMargins, CachedConsoleMessage, CachedConsoleMessageTyp
 use devtools_traits::{ComputedNodeLayout, ConsoleAPI, PageError};
 use devtools_traits::{EvaluateJSReply, Modification, NodeInfo, TimelineMarker};
 use ipc_channel::ipc::IpcSender;
-use js::jsapi::JSAutoCompartment;
+use js::jsapi::JSAutoRealm;
 use js::jsval::UndefinedValue;
 use js::rust::wrappers::ObjectClassName;
 use msg::constellation_msg::PipelineId;
 use std::ffi::CStr;
 use std::str;
-use style::properties::longhands::{margin_bottom, margin_left, margin_right, margin_top};
 use uuid::Uuid;
 
 #[allow(unsafe_code)]
@@ -38,7 +37,7 @@ pub fn handle_evaluate_js(global: &GlobalScope, eval: String, reply: IpcSender<E
     let result = unsafe {
         let cx = global.get_cx();
         let globalhandle = global.reflector().get_jsobject();
-        let _ac = JSAutoCompartment::new(cx, globalhandle.get());
+        let _ac = JSAutoRealm::new(cx, globalhandle.get());
         rooted!(in(cx) let mut rval = UndefinedValue());
         global.evaluate_js_on_global_with_result(&eval, rval.handle_mut());
 
@@ -104,7 +103,7 @@ fn find_node_by_unique_id(
     documents.find_document(pipeline).and_then(|document| {
         document
             .upcast::<Node>()
-            .traverse_preorder()
+            .traverse_preorder(ShadowIncluding::Yes)
             .find(|candidate| candidate.unique_id() == node_id)
     })
 }
@@ -178,10 +177,10 @@ fn determine_auto_margins(window: &Window, node: &Node) -> AutoMargins {
     let style = window.style_query(node.to_trusted_node_address()).unwrap();
     let margin = style.get_margin();
     AutoMargins {
-        top: margin.margin_top == margin_top::computed_value::T::Auto,
-        right: margin.margin_right == margin_right::computed_value::T::Auto,
-        bottom: margin.margin_bottom == margin_bottom::computed_value::T::Auto,
-        left: margin.margin_left == margin_left::computed_value::T::Auto,
+        top: margin.margin_top.is_auto(),
+        right: margin.margin_right.is_auto(),
+        bottom: margin.margin_bottom.is_auto(),
+        left: margin.margin_left.is_auto(),
     }
 }
 

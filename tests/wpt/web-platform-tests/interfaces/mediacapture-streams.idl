@@ -38,7 +38,6 @@ interface MediaStreamTrack : EventTarget {
     MediaTrackConstraints getConstraints();
     MediaTrackSettings getSettings();
     Promise<void> applyConstraints(optional MediaTrackConstraints constraints);
-                    attribute EventHandler onoverconstrained;
 };
 
 enum MediaStreamTrackState {
@@ -149,29 +148,18 @@ dictionary MediaStreamTrackEventInit : EventInit {
     required MediaStreamTrack track;
 };
 
-[Exposed=Window,
- Constructor(DOMString type, OverconstrainedErrorEventInit eventInitDict)]
-interface OverconstrainedErrorEvent : Event {
-    readonly        attribute OverconstrainedError? error;
-};
-
-dictionary OverconstrainedErrorEventInit : EventInit {
-             OverconstrainedError? error = null;
-};
-
 partial interface Navigator {
     [SameObject, SecureContext]
     readonly        attribute MediaDevices mediaDevices;
 };
 
-[Exposed=Window,
-SecureContext]
+[Exposed=Window, SecureContext]
 interface MediaDevices : EventTarget {
                     attribute EventHandler ondevicechange;
     Promise<sequence<MediaDeviceInfo>> enumerateDevices();
 };
 
-[Exposed=Window]
+[Exposed=Window, SecureContext]
 interface MediaDeviceInfo {
     readonly        attribute DOMString deviceId;
     readonly        attribute MediaDeviceKind kind;
@@ -210,15 +198,6 @@ callback NavigatorUserMediaSuccessCallback = void (MediaStream stream);
 callback NavigatorUserMediaErrorCallback = void (MediaStreamError error);
 
 typedef object MediaStreamError;
-
-[NoInterfaceObject]
-interface ConstrainablePattern {
-    Capabilities getCapabilities();
-    Constraints getConstraints();
-    Settings getSettings();
-    Promise<void> applyConstraints(optional Constraints constraints);
-                    attribute EventHandler onoverconstrained;
-};
 
 dictionary DoubleRange {
              double max;

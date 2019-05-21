@@ -19,7 +19,9 @@ use crate::dom::element::{AttributeMutation, Element, RawLayoutElementHelpers};
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::htmlelement::HTMLElement;
-use crate::dom::node::{document_from_node, window_from_node, Node, NodeDamage, UnbindContext};
+use crate::dom::node::{
+    document_from_node, window_from_node, BindContext, Node, NodeDamage, UnbindContext,
+};
 use crate::dom::virtualmethods::VirtualMethods;
 use crate::dom::window::ReflowReason;
 use crate::dom::windowproxy::WindowProxy;
@@ -30,6 +32,7 @@ use euclid::TypedSize2D;
 use html5ever::{LocalName, Prefix};
 use ipc_channel::ipc;
 use msg::constellation_msg::{BrowsingContextId, PipelineId, TopLevelBrowsingContextId};
+use net_traits::request::Referrer;
 use profile_traits::ipc as ProfiledIpc;
 use script_layout_interface::message::ReflowGoal;
 use script_traits::IFrameSandboxState::{IFrameSandboxed, IFrameUnsandboxed};
@@ -269,8 +272,8 @@ impl HTMLIFrameElement {
         let load_data = LoadData::new(
             url,
             creator_pipeline_id,
+            Some(Referrer::ReferrerUrl(document.url())),
             document.get_referrer_policy(),
-            Some(document.url()),
         );
 
         let pipeline_id = self.pipeline_id();
@@ -278,9 +281,7 @@ impl HTMLIFrameElement {
         // see https://html.spec.whatwg.org/multipage/#the-iframe-element:about:blank-3
         let is_about_blank =
             pipeline_id.is_some() && pipeline_id == self.about_blank_pipeline_id.get();
-        // Replacement enabled also takes into account whether the document is "completely loaded",
-        // see https://html.spec.whatwg.org/multipage/#the-iframe-element:completely-loaded
-        let replace = is_about_blank || !document.is_completely_loaded();
+        let replace = is_about_blank;
         self.navigate_or_reload_child_browsing_context(
             Some(load_data),
             NavigationType::Regular,
@@ -297,8 +298,8 @@ impl HTMLIFrameElement {
         let load_data = LoadData::new(
             url,
             pipeline_id,
+            Some(Referrer::ReferrerUrl(document.url().clone())),
             document.get_referrer_policy(),
-            Some(document.url().clone()),
         );
         let browsing_context_id = BrowsingContextId::new();
         let top_level_browsing_context_id = window.window_proxy().top_level_browsing_context_id();
@@ -397,16 +398,6 @@ impl HTMLIFrameElement {
         if self.visibility.get() != visibility {
             self.visibility.set(visibility);
         }
-    }
-
-    pub fn set_visible(&self, visible: bool) {
-        let msg = ScriptMsg::SetVisible(visible);
-        let window = window_from_node(self);
-        window
-            .upcast::<GlobalScope>()
-            .script_to_constellation_chan()
-            .send(msg)
-            .unwrap();
     }
 
     /// https://html.spec.whatwg.org/multipage/#iframe-load-event-steps steps 1-4
@@ -595,7 +586,7 @@ impl VirtualMethods for HTMLIFrameElement {
                 // may be in a different script thread. Instread, we check to see if the parent
                 // is in a document tree and has a browsing context, which is what causes
                 // the child browsing context to be created.
-                if self.upcast::<Node>().is_in_doc_with_browsing_context() {
+                if self.upcast::<Node>().is_connected_with_browsing_context() {
                     debug!("iframe src set while in browsing context.");
                     self.process_the_iframe_attributes(ProcessingMode::NotFirstTime);
                 }
@@ -621,11 +612,12 @@ impl VirtualMethods for HTMLIFrameElement {
         }
     }
 
-    fn bind_to_tree(&self, tree_in_doc: bool) {
+    fn bind_to_tree(&self, context: &BindContext) {
         if let Some(ref s) = self.super_type() {
-            s.bind_to_tree(tree_in_doc);
+            s.bind_to_tree(context);
         }
 
+        let tree_connected = context.tree_connected;
         let iframe = Trusted::new(self);
         document_from_node(self).add_delayed_task(task!(IFrameDelayedInitialize: move || {
             let this = iframe.root();
@@ -635,9 +627,9 @@ impl VirtualMethods for HTMLIFrameElement {
             // browsing context, set the element's nested browsing context
             // to the newly-created browsing context, and then process the
             // iframe attributes for the "first time"."
-            if this.upcast::<Node>().is_in_doc_with_browsing_context() {
+            if this.upcast::<Node>().is_connected_with_browsing_context() {
                 debug!("iframe bound to browsing context.");
-                debug_assert!(tree_in_doc, "is_in_doc_with_bc, but not tree_in_doc");
+                debug_assert!(tree_connected, "is_connected_with_bc, but not tree_connected");
                 this.create_nested_browsing_context();
                 this.process_the_iframe_attributes(ProcessingMode::FirstTime);
             }

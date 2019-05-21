@@ -7,6 +7,7 @@ use crate::dom::abstractworker::WorkerScriptMsg;
 use crate::dom::abstractworkerglobalscope::{run_worker_event_loop, WorkerEventLoopMethods};
 use crate::dom::bindings::codegen::Bindings::ServiceWorkerGlobalScopeBinding;
 use crate::dom::bindings::codegen::Bindings::ServiceWorkerGlobalScopeBinding::ServiceWorkerGlobalScopeMethods;
+use crate::dom::bindings::codegen::Bindings::WorkerBinding::WorkerType;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::DomObject;
 use crate::dom::bindings::root::{DomRoot, RootCollection, ThreadLocalStackRoots};
@@ -19,6 +20,7 @@ use crate::dom::extendablemessageevent::ExtendableMessageEvent;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::worker::TrustedWorkerAddress;
 use crate::dom::workerglobalscope::WorkerGlobalScope;
+use crate::fetch::load_whole_resource;
 use crate::script_runtime::{new_rt_and_cx, CommonScriptMsg, Runtime, ScriptChan};
 use crate::task_queue::{QueuedTask, QueuedTaskConversion, TaskQueue};
 use crate::task_source::TaskSourceName;
@@ -27,14 +29,15 @@ use devtools_traits::DevtoolScriptControlMsg;
 use dom_struct::dom_struct;
 use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
 use ipc_channel::router::ROUTER;
-use js::jsapi::{JSAutoCompartment, JSContext, JS_AddInterruptCallback};
+use js::jsapi::{JSAutoRealm, JSContext, JS_AddInterruptCallback};
 use js::jsval::UndefinedValue;
-use net_traits::request::{CredentialsMode, Destination, RequestInit};
-use net_traits::{load_whole_resource, CustomResponseMediator, IpcSend};
+use msg::constellation_msg::PipelineId;
+use net_traits::request::{CredentialsMode, Destination, ParserMetadata, Referrer, RequestBuilder};
+use net_traits::{CustomResponseMediator, IpcSend};
 use script_traits::{
     ScopeThings, ServiceWorkerMsg, TimerEvent, WorkerGlobalScopeInit, WorkerScriptLoadOrigin,
 };
-use servo_config::prefs::PREFS;
+use servo_config::pref;
 use servo_rand::random;
 use servo_url::ServoUrl;
 use std::thread;
@@ -61,8 +64,14 @@ impl QueuedTaskConversion for ServiceWorkerScriptMsg {
             CommonScriptMsg::Task(_category, _boxed, _pipeline_id, task_source) => {
                 Some(&task_source)
             },
-            _ => return None,
+            _ => None,
         }
+    }
+
+    fn pipeline_id(&self) -> Option<PipelineId> {
+        // Workers always return None, since the pipeline_id is only used to check for document activity,
+        // and this check does not apply to worker event-loops.
+        None
     }
 
     fn into_queued_task(self) -> Option<QueuedTask> {
@@ -83,6 +92,11 @@ impl QueuedTaskConversion for ServiceWorkerScriptMsg {
         let (_worker, category, boxed, pipeline_id, task_source) = queued_task;
         let script_msg = CommonScriptMsg::Task(category, boxed, pipeline_id, task_source);
         ServiceWorkerScriptMsg::CommonWorker(WorkerScriptMsg::Common(script_msg))
+    }
+
+    fn inactive_msg() -> Self {
+        // Inactive is only relevant in the context of a browsing-context event-loop.
+        panic!("Workers should never receive messages marked as inactive");
     }
 
     fn wake_up_msg() -> Self {
@@ -190,6 +204,8 @@ impl ServiceWorkerGlobalScope {
         ServiceWorkerGlobalScope {
             workerglobalscope: WorkerGlobalScope::new_inherited(
                 init,
+                DOMString::new(),
+                WorkerType::Classic, // FIXME(cybai): Should be provided from `Run Service Worker`
                 worker_url,
                 runtime,
                 from_devtools_receiver,
@@ -269,28 +285,31 @@ impl ServiceWorkerGlobalScope {
                     pipeline_id,
                 } = worker_load_origin;
 
-                let request = RequestInit {
-                    url: script_url.clone(),
-                    destination: Destination::ServiceWorker,
-                    credentials_mode: CredentialsMode::Include,
-                    use_url_credentials: true,
-                    pipeline_id: pipeline_id,
-                    referrer_url: referrer_url,
-                    referrer_policy: referrer_policy,
-                    origin,
-                    ..RequestInit::default()
-                };
+                let referrer = referrer_url.map(|referrer_url| Referrer::ReferrerUrl(referrer_url));
 
-                let (url, source) =
-                    match load_whole_resource(request, &init.resource_threads.sender()) {
-                        Err(_) => {
-                            println!("error loading script {}", serialized_worker_url);
-                            return;
-                        },
-                        Ok((metadata, bytes)) => {
-                            (metadata.final_url, String::from_utf8(bytes).unwrap())
-                        },
-                    };
+                let request = RequestBuilder::new(script_url.clone())
+                    .destination(Destination::ServiceWorker)
+                    .credentials_mode(CredentialsMode::Include)
+                    .parser_metadata(ParserMetadata::NotParserInserted)
+                    .use_url_credentials(true)
+                    .pipeline_id(pipeline_id)
+                    .referrer(referrer)
+                    .referrer_policy(referrer_policy)
+                    .origin(origin);
+
+                let (url, source) = match load_whole_resource(
+                    request,
+                    &init.resource_threads.sender(),
+                    &GlobalScope::current().expect("No current global object"),
+                ) {
+                    Err(_) => {
+                        println!("error loading script {}", serialized_worker_url);
+                        return;
+                    },
+                    Ok((metadata, bytes)) => {
+                        (metadata.final_url, String::from_utf8(bytes).unwrap())
+                    },
+                };
 
                 let runtime = new_rt_and_cx();
 
@@ -324,10 +343,7 @@ impl ServiceWorkerGlobalScope {
                 thread::Builder::new()
                     .name("SWTimeoutThread".to_owned())
                     .spawn(move || {
-                        let sw_lifetime_timeout = PREFS
-                            .get("dom.serviceworker.timeout_seconds")
-                            .as_u64()
-                            .unwrap();
+                        let sw_lifetime_timeout = pref!(dom.serviceworker.timeout_seconds) as u64;
                         thread::sleep(Duration::new(sw_lifetime_timeout, 0));
                         let _ = timer_chan.send(());
                     })
@@ -394,8 +410,7 @@ impl ServiceWorkerGlobalScope {
             CommonWorker(WorkerScriptMsg::DOMMessage(data)) => {
                 let scope = self.upcast::<WorkerGlobalScope>();
                 let target = self.upcast();
-                let _ac =
-                    JSAutoCompartment::new(scope.get_cx(), scope.reflector().get_jsobject().get());
+                let _ac = JSAutoRealm::new(scope.get_cx(), scope.reflector().get_jsobject().get());
                 rooted!(in(scope.get_cx()) let mut message = UndefinedValue());
                 data.read(scope.upcast(), message.handle_mut());
                 ExtendableMessageEvent::dispatch_jsval(target, scope.upcast(), message.handle());

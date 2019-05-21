@@ -13,15 +13,18 @@ use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::htmlelement::HTMLElement;
 use crate::dom::htmllinkelement::{HTMLLinkElement, RequestGenerationId};
-use crate::dom::node::{document_from_node, window_from_node};
+use crate::dom::node::{containing_shadow_root, document_from_node, window_from_node};
 use crate::dom::performanceresourcetiming::InitiatorType;
+use crate::dom::shadowroot::ShadowRoot;
 use crate::network_listener::{self, NetworkListener, PreInvoke, ResourceTimingListener};
 use cssparser::SourceLocation;
 use encoding_rs::UTF_8;
 use ipc_channel::ipc;
 use ipc_channel::router::ROUTER;
 use mime::{self, Mime};
-use net_traits::request::{CorsSettings, CredentialsMode, Destination, RequestInit, RequestMode};
+use net_traits::request::{
+    CorsSettings, CredentialsMode, Destination, Referrer, RequestBuilder, RequestMode,
+};
 use net_traits::{
     FetchMetadata, FetchResponseListener, FilteredMetadata, Metadata, NetworkError, ReferrerPolicy,
 };
@@ -79,6 +82,7 @@ pub struct StylesheetContext {
     data: Vec<u8>,
     /// The node document for elem when the load was initiated.
     document: Trusted<Document>,
+    shadow_root: Option<Trusted<ShadowRoot>>,
     origin_clean: bool,
     /// A token which must match the generation id of the `HTMLLinkElement` for it to load the stylesheet.
     /// This is ignored for `HTMLStyleElement` and imports.
@@ -185,7 +189,11 @@ impl FetchResponseListener for StylesheetContext {
                 },
             }
 
-            document.invalidate_stylesheets();
+            if let Some(ref shadow_root) = self.shadow_root {
+                shadow_root.root().invalidate_stylesheets();
+            } else {
+                document.invalidate_stylesheets();
+            }
 
             // FIXME: Revisit once consensus is reached at:
             // https://github.com/whatwg/html/issues/1142
@@ -262,6 +270,7 @@ impl<'a> StylesheetLoader<'a> {
         integrity_metadata: String,
     ) {
         let document = document_from_node(self.elem);
+        let shadow_root = containing_shadow_root(self.elem).map(|sr| Trusted::new(&*sr));
         let gen = self
             .elem
             .downcast::<HTMLLinkElement>()
@@ -273,6 +282,7 @@ impl<'a> StylesheetLoader<'a> {
             metadata: None,
             data: vec![],
             document: Trusted::new(&*document),
+            shadow_root,
             origin_clean: true,
             request_generation_id: gen,
             resource_timing: ResourceFetchTiming::new(ResourceTimingType::Resource),
@@ -308,28 +318,25 @@ impl<'a> StylesheetLoader<'a> {
             document.increment_script_blocking_stylesheet_count();
         }
 
-        let request = RequestInit {
-            url: url.clone(),
-            destination: Destination::Style,
+        let request = RequestBuilder::new(url.clone())
+            .destination(Destination::Style)
             // https://html.spec.whatwg.org/multipage/#create-a-potential-cors-request
             // Step 1
-            mode: match cors_setting {
+            .mode(match cors_setting {
                 Some(_) => RequestMode::CorsMode,
                 None => RequestMode::NoCors,
-            },
+            })
             // https://html.spec.whatwg.org/multipage/#create-a-potential-cors-request
             // Step 3-4
-            credentials_mode: match cors_setting {
+            .credentials_mode(match cors_setting {
                 Some(CorsSettings::Anonymous) => CredentialsMode::CredentialsSameOrigin,
                 _ => CredentialsMode::Include,
-            },
-            origin: document.origin().immutable().clone(),
-            pipeline_id: Some(self.elem.global().pipeline_id()),
-            referrer_url: Some(document.url()),
-            referrer_policy: referrer_policy,
-            integrity_metadata: integrity_metadata,
-            ..RequestInit::default()
-        };
+            })
+            .origin(document.origin().immutable().clone())
+            .pipeline_id(Some(self.elem.global().pipeline_id()))
+            .referrer(Some(Referrer::ReferrerUrl(document.url())))
+            .referrer_policy(referrer_policy)
+            .integrity_metadata(integrity_metadata);
 
         document.fetch_async(LoadType::Stylesheet(url), request, action_sender);
     }

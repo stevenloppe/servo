@@ -10,6 +10,7 @@
 //! thread pool implementation, which only performs GC or code loading on
 //! a backup thread, not on the primary worklet thread.
 
+use crate::compartments::{AlreadyInCompartment, InCompartment};
 use crate::dom::bindings::codegen::Bindings::RequestBinding::RequestCredentials;
 use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowBinding::WindowMethods;
 use crate::dom::bindings::codegen::Bindings::WorkletBinding::WorkletMethods;
@@ -32,6 +33,7 @@ use crate::dom::workletglobalscope::WorkletGlobalScope;
 use crate::dom::workletglobalscope::WorkletGlobalScopeInit;
 use crate::dom::workletglobalscope::WorkletGlobalScopeType;
 use crate::dom::workletglobalscope::WorkletTask;
+use crate::fetch::load_whole_resource;
 use crate::script_runtime::new_rt_and_cx;
 use crate::script_runtime::CommonScriptMsg;
 use crate::script_runtime::Runtime;
@@ -44,11 +46,10 @@ use dom_struct::dom_struct;
 use js::jsapi::JSGCParamKey;
 use js::jsapi::JSTracer;
 use js::jsapi::JS_GetGCParameter;
-use js::jsapi::JS_GC;
+use js::jsapi::{GCReason, JS_GC};
 use msg::constellation_msg::PipelineId;
-use net_traits::load_whole_resource;
 use net_traits::request::Destination;
-use net_traits::request::RequestInit;
+use net_traits::request::RequestBuilder;
 use net_traits::request::RequestMode;
 use net_traits::IpcSend;
 use servo_url::ImmutableOrigin;
@@ -112,7 +113,12 @@ impl WorkletMethods for Worklet {
     /// <https://drafts.css-houdini.org/worklets/#dom-worklet-addmodule>
     fn AddModule(&self, module_url: USVString, options: &WorkletOptions) -> Rc<Promise> {
         // Step 1.
-        let promise = Promise::new(self.window.upcast());
+        let global = self.window.upcast();
+        let in_compartment_proof = AlreadyInCompartment::assert(&global);
+        let promise = Promise::new_in_current_compartment(
+            &global,
+            InCompartment::Already(&in_compartment_proof),
+        );
 
         // Step 3.
         let module_url_record = match self.window.Document().base_url().join(&module_url.0) {
@@ -562,7 +568,7 @@ impl WorkletThread {
             self.current_memory_usage(),
             self.gc_threshold
         );
-        unsafe { JS_GC(self.runtime.cx()) };
+        unsafe { JS_GC(self.runtime.cx(), GCReason::API) };
         self.gc_threshold = max(MIN_GC_THRESHOLD, self.current_memory_usage() * 2);
         debug!(
             "END GC (usage = {}, threshold = {}).",
@@ -619,17 +625,19 @@ impl WorkletThread {
         // TODO: Fetch the script asynchronously?
         // TODO: Caching.
         let resource_fetcher = self.global_init.resource_threads.sender();
-        let request = RequestInit {
-            url: script_url,
-            destination: Destination::Script,
-            mode: RequestMode::CorsMode,
-            credentials_mode: credentials.into(),
-            origin,
-            ..RequestInit::default()
-        };
-        let script = load_whole_resource(request, &resource_fetcher)
-            .ok()
-            .and_then(|(_, bytes)| String::from_utf8(bytes).ok());
+        let request = RequestBuilder::new(script_url)
+            .destination(Destination::Script)
+            .mode(RequestMode::CorsMode)
+            .credentials_mode(credentials.into())
+            .origin(origin);
+
+        let script = load_whole_resource(
+            request,
+            &resource_fetcher,
+            &global_scope.upcast::<GlobalScope>(),
+        )
+        .ok()
+        .and_then(|(_, bytes)| String::from_utf8(bytes).ok());
 
         // Step 4.
         // NOTE: the spec parses and executes the script in separate steps,

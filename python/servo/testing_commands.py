@@ -279,7 +279,7 @@ class MachCommands(CommandBase):
 
         features = self.servo_features()
         if len(packages) > 0 or len(in_crate_packages) > 0:
-            args = ["cargo", "bench" if bench else "test", "--manifest-path", self.ports_servo_manifest()]
+            args = ["cargo", "bench" if bench else "test", "--manifest-path", self.ports_glutin_manifest()]
             for crate in packages:
                 args += ["-p", "%s_tests" % crate]
             for crate in in_crate_packages:
@@ -971,3 +971,13 @@ testing/web-platform/mozilla/tests for Servo-only tests""" % reference_path)
         run_globals = {"__file__": run_file}
         execfile(run_file, run_globals)
         return run_globals["update_conformance"](version, dest_folder, None, patches_dir)
+
+    @Command('smoketest',
+             description='Load a simple page in Servo and ensure that it closes properly',
+             category='testing')
+    @CommandArgument('params', nargs='...',
+                     help="Command-line arguments to be passed through to Servo")
+    def smoketest(self, params):
+        params = params + ['tests/html/close-on-load.html']
+        return self.context.commands.dispatch(
+            'run', self.context, params=params)

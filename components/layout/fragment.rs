@@ -61,9 +61,10 @@ use style::selector_parser::RestyleDamage;
 use style::servo::restyle_damage::ServoRestyleDamage;
 use style::str::char_is_whitespace;
 use style::values::computed::counters::ContentItem;
-use style::values::computed::{LengthPercentage, LengthPercentageOrAuto};
-use style::values::generics::box_::{Perspective, VerticalAlign};
+use style::values::computed::{LengthPercentage, LengthPercentageOrAuto, Size, VerticalAlign};
+use style::values::generics::box_::{Perspective, VerticalAlignKeyword};
 use style::values::generics::transform;
+use style::Zero;
 use webrender_api::{self, LayoutTransform};
 
 // From gfxFontConstants.h in Firefox.
@@ -985,9 +986,17 @@ impl Fragment {
         if flags.contains(
             QuantitiesIncludedInIntrinsicInlineSizes::INTRINSIC_INLINE_SIZE_INCLUDES_SPECIFIED,
         ) {
-            specified =
-                MaybeAuto::from_style(style.content_inline_size(), Au(0)).specified_or_zero();
-            specified = max(style.min_inline_size().to_used_value(Au(0)), specified);
+            specified = style
+                .content_inline_size()
+                .to_used_value(Au(0))
+                .unwrap_or(Au(0));
+            specified = max(
+                style
+                    .min_inline_size()
+                    .to_used_value(Au(0))
+                    .unwrap_or(Au(0)),
+                specified,
+            );
             if let Some(max) = style.max_inline_size().to_used_value(Au(0)) {
                 specified = min(specified, max)
             }
@@ -1611,10 +1620,8 @@ impl Fragment {
             SpecificFragmentInfo::Iframe(_) |
             SpecificFragmentInfo::Svg(_) => {
                 let inline_size = match self.style.content_inline_size() {
-                    LengthPercentageOrAuto::Auto => None,
-                    LengthPercentageOrAuto::LengthPercentage(ref lp) => {
-                        lp.maybe_to_used_value(None)
-                    },
+                    Size::Auto => None,
+                    Size::LengthPercentage(ref lp) => lp.maybe_to_used_value(None),
                 };
 
                 let mut inline_size = inline_size.unwrap_or_else(|| {
@@ -1652,7 +1659,9 @@ impl Fragment {
                 handle_text(text_fragment_info, self, &mut result)
             },
 
-            SpecificFragmentInfo::TruncatedFragment(_) => return IntrinsicISizesContribution::new(),
+            SpecificFragmentInfo::TruncatedFragment(_) => {
+                return IntrinsicISizesContribution::new()
+            },
 
             SpecificFragmentInfo::UnscannedText(..) => {
                 panic!("Unscanned text fragments should have been scanned by now!")
@@ -2388,47 +2397,49 @@ impl Fragment {
             // FIXME(#5624, pcwalton): This passes our current reftests but isn't the right thing
             // to do.
             match style.get_box().vertical_align {
-                VerticalAlign::Baseline => {},
-                VerticalAlign::Middle => {
-                    let font_metrics =
-                        with_thread_local_font_context(layout_context, |font_context| {
-                            text::font_metrics_for_style(font_context, self.style.clone_font())
-                        });
-                    offset += (content_inline_metrics.ascent -
-                        content_inline_metrics.space_below_baseline -
-                        font_metrics.x_height)
-                        .scale_by(0.5)
-                },
-                VerticalAlign::Sub => {
-                    offset += minimum_line_metrics
-                        .space_needed()
-                        .scale_by(FONT_SUBSCRIPT_OFFSET_RATIO)
-                },
-                VerticalAlign::Super => {
-                    offset -= minimum_line_metrics
-                        .space_needed()
-                        .scale_by(FONT_SUPERSCRIPT_OFFSET_RATIO)
-                },
-                VerticalAlign::TextTop => {
-                    offset = self.content_inline_metrics(layout_context).ascent -
-                        minimum_line_metrics.space_above_baseline
-                },
-                VerticalAlign::TextBottom => {
-                    offset = minimum_line_metrics.space_below_baseline -
-                        self.content_inline_metrics(layout_context)
-                            .space_below_baseline
-                },
-                VerticalAlign::Top => {
-                    if let Some(actual_line_metrics) = actual_line_metrics {
-                        offset =
-                            content_inline_metrics.ascent - actual_line_metrics.space_above_baseline
-                    }
-                },
-                VerticalAlign::Bottom => {
-                    if let Some(actual_line_metrics) = actual_line_metrics {
-                        offset = actual_line_metrics.space_below_baseline -
-                            content_inline_metrics.space_below_baseline
-                    }
+                VerticalAlign::Keyword(kw) => match kw {
+                    VerticalAlignKeyword::Baseline => {},
+                    VerticalAlignKeyword::Middle => {
+                        let font_metrics =
+                            with_thread_local_font_context(layout_context, |font_context| {
+                                text::font_metrics_for_style(font_context, self.style.clone_font())
+                            });
+                        offset += (content_inline_metrics.ascent -
+                            content_inline_metrics.space_below_baseline -
+                            font_metrics.x_height)
+                            .scale_by(0.5)
+                    },
+                    VerticalAlignKeyword::Sub => {
+                        offset += minimum_line_metrics
+                            .space_needed()
+                            .scale_by(FONT_SUBSCRIPT_OFFSET_RATIO)
+                    },
+                    VerticalAlignKeyword::Super => {
+                        offset -= minimum_line_metrics
+                            .space_needed()
+                            .scale_by(FONT_SUPERSCRIPT_OFFSET_RATIO)
+                    },
+                    VerticalAlignKeyword::TextTop => {
+                        offset = self.content_inline_metrics(layout_context).ascent -
+                            minimum_line_metrics.space_above_baseline
+                    },
+                    VerticalAlignKeyword::TextBottom => {
+                        offset = minimum_line_metrics.space_below_baseline -
+                            self.content_inline_metrics(layout_context)
+                                .space_below_baseline
+                    },
+                    VerticalAlignKeyword::Top => {
+                        if let Some(actual_line_metrics) = actual_line_metrics {
+                            offset = content_inline_metrics.ascent -
+                                actual_line_metrics.space_above_baseline
+                        }
+                    },
+                    VerticalAlignKeyword::Bottom => {
+                        if let Some(actual_line_metrics) = actual_line_metrics {
+                            offset = actual_line_metrics.space_below_baseline -
+                                content_inline_metrics.space_below_baseline
+                        }
+                    },
                 },
                 VerticalAlign::Length(ref lp) => {
                     offset -= lp.to_used_value(minimum_line_metrics.space_needed());
@@ -3078,15 +3089,22 @@ impl Fragment {
     /// Returns true if any of the inline styles associated with this fragment have
     /// `vertical-align` set to `top` or `bottom`.
     pub fn is_vertically_aligned_to_top_or_bottom(&self) -> bool {
-        match self.style.get_box().vertical_align {
-            VerticalAlign::Top | VerticalAlign::Bottom => return true,
-            _ => {},
+        fn is_top_or_bottom(v: &VerticalAlign) -> bool {
+            match *v {
+                VerticalAlign::Keyword(VerticalAlignKeyword::Top) |
+                VerticalAlign::Keyword(VerticalAlignKeyword::Bottom) => true,
+                _ => false,
+            }
         }
+
+        if is_top_or_bottom(&self.style.get_box().vertical_align) {
+            return true;
+        }
+
         if let Some(ref inline_context) = self.inline_context {
             for node in &inline_context.nodes {
-                match node.style.get_box().vertical_align {
-                    VerticalAlign::Top | VerticalAlign::Bottom => return true,
-                    _ => {},
+                if is_top_or_bottom(&node.style.get_box().vertical_align) {
+                    return true;
                 }
             }
         }

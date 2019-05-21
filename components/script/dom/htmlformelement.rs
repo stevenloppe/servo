@@ -15,7 +15,7 @@ use crate::dom::bindings::codegen::Bindings::HTMLTextAreaElementBinding::HTMLTex
 use crate::dom::bindings::inheritance::{Castable, ElementTypeId, HTMLElementTypeId, NodeTypeId};
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomObject;
-use crate::dom::bindings::root::{Dom, DomOnceCell, DomRoot, RootedReference};
+use crate::dom::bindings::root::{Dom, DomOnceCell, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::blob::Blob;
 use crate::dom::document::Document;
@@ -41,7 +41,8 @@ use crate::dom::htmloutputelement::HTMLOutputElement;
 use crate::dom::htmlselectelement::HTMLSelectElement;
 use crate::dom::htmltextareaelement::HTMLTextAreaElement;
 use crate::dom::node::{document_from_node, window_from_node};
-use crate::dom::node::{Node, NodeFlags, UnbindContext, VecPreOrderInsertionHelper};
+use crate::dom::node::{Node, NodeFlags, ShadowIncluding};
+use crate::dom::node::{UnbindContext, VecPreOrderInsertionHelper};
 use crate::dom::validitystate::ValidationFlags;
 use crate::dom::virtualmethods::VirtualMethods;
 use crate::dom::window::Window;
@@ -55,6 +56,7 @@ use html5ever::{LocalName, Prefix};
 use hyper::Method;
 use mime::{self, Mime};
 use net_traits::http_percent_encode;
+use net_traits::request::Referrer;
 use script_traits::LoadData;
 use servo_rand::random;
 use std::borrow::ToOwned;
@@ -400,8 +402,8 @@ impl HTMLFormElement {
         let mut load_data = LoadData::new(
             action_components,
             None,
+            Some(Referrer::ReferrerUrl(target_document.url())),
             target_document.get_referrer_policy(),
-            Some(target_document.url()),
         );
 
         // Step 22
@@ -581,7 +583,7 @@ impl HTMLFormElement {
         //               form, refactor this when html5ever's form owner PR lands
         // Step 1-3
         let invalid_controls = node
-            .traverse_preorder()
+            .traverse_preorder(ShadowIncluding::No)
             .filter_map(|field| {
                 if let Some(el) = field.downcast::<Element>() {
                     if el.disabled_state() {
@@ -817,7 +819,7 @@ impl HTMLFormElement {
 
     fn add_control<T: ?Sized + FormControl>(&self, control: &T) {
         let root = self.upcast::<Element>().root_element();
-        let root = root.r().upcast::<Node>();
+        let root = root.upcast::<Node>();
 
         let mut controls = self.controls.borrow_mut();
         controls.insert_pre_order(control.to_element(), root);
@@ -828,7 +830,7 @@ impl HTMLFormElement {
         let mut controls = self.controls.borrow_mut();
         controls
             .iter()
-            .position(|c| c.r() == control)
+            .position(|c| &**c == control)
             .map(|idx| controls.remove(idx));
     }
 }
@@ -1072,11 +1074,10 @@ pub trait FormControl: DomObject {
             if let Some(o) = old_owner {
                 o.remove_control(self);
             }
-            let new_owner = new_owner.as_ref().map(|o| {
-                o.add_control(self);
-                o.r()
-            });
-            self.set_form_owner(new_owner);
+            if let Some(ref new_owner) = new_owner {
+                new_owner.add_control(self);
+            }
+            self.set_form_owner(new_owner.deref());
         }
     }
 
@@ -1100,7 +1101,7 @@ pub trait FormControl: DomObject {
         let form_id = elem.get_string_attribute(&local_name!("form"));
         let node = elem.upcast::<Node>();
 
-        if self.is_listed() && !form_id.is_empty() && node.is_in_doc() {
+        if self.is_listed() && !form_id.is_empty() && node.is_connected() {
             let doc = document_from_node(node);
             doc.register_form_id_listener(form_id, self);
         }

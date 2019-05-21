@@ -18,8 +18,7 @@ def main(task_for):
 
     if task_for == "github-push":
         # FIXME https://github.com/servo/servo/issues/22325 implement these:
-        magicleap_dev = linux_arm32_dev = linux_arm64_dev = \
-            android_arm32_dev_from_macos = lambda: None
+        linux_arm32_dev = linux_arm64_dev = lambda: None
 
         # FIXME https://github.com/servo/servo/issues/22187
         # In-emulator testing is disabled for now. (Instead we only compile.)
@@ -32,9 +31,11 @@ def main(task_for):
         all_tests = [
             linux_tidy_unit_docs,
             windows_unit,
+            windows_x86,
             macos_unit,
             magicleap_dev,
             android_arm32_dev,
+            android_arm32_dev_from_macos,
             android_arm32_release,
             android_x86_wpt,
             linux_arm32_dev,
@@ -57,7 +58,7 @@ def main(task_for):
 
             "try-mac": [macos_unit],
             "try-linux": [linux_tidy_unit_docs],
-            "try-windows": [windows_unit],
+            "try-windows": [windows_unit, windows_x86],
             "try-magicleap": [magicleap_dev],
             "try-arm": [linux_arm32_dev, linux_arm64_dev],
             "try-wpt": [linux_wpt],
@@ -75,6 +76,7 @@ def main(task_for):
     elif task_for == "github-pull-request":
         CONFIG.treeherder_repository_name = "servo-prs"
         CONFIG.index_read_only = True
+        CONFIG.docker_image_build_worker_type = None
 
         # We want the merge commit that GitHub creates for the PR.
         # The event does contain a `pull_request.merge_commit_sha` key, but it is wrong:
@@ -88,6 +90,11 @@ def main(task_for):
         daily_tasks_setup()
         with_rust_nightly()
         linux_nightly()
+        android_nightly()
+        windows_nightly()
+        macos_nightly()
+        update_wpt()
+        magicleap_nightly()
 
 
 # These are disabled in a "real" decision task,
@@ -119,8 +126,20 @@ linux_build_env = {
 }
 macos_build_env = {}
 windows_build_env = {
-    "LIB": "%HOMEDRIVE%%HOMEPATH%\\gst\\gstreamer\\1.0\\x86_64\\lib;%LIB%",
+    "x86": {
+        "LIB": "%HOMEDRIVE%%HOMEPATH%\\gst\\gstreamer\\1.0\\x86\\lib;%LIB%",
+        "GSTREAMER_1_0_ROOT_X86": "%HOMEDRIVE%%HOMEPATH%\\gst\\gstreamer\\1.0\\x86\\",
+    },
+    "x86_64": {
+        "LIB": "%HOMEDRIVE%%HOMEPATH%\\gst\\gstreamer\\1.0\\x86_64\\lib;%LIB%",
+        "GSTREAMER_1_0_ROOT_X86_64": "%HOMEDRIVE%%HOMEPATH%\\gst\\gstreamer\\1.0\\x86_64\\",
+    },
+    "all": {
+        "PYTHON3": "%HOMEDRIVE%%HOMEPATH%\\python3\\python.exe",
+        "LINKER": "lld-link.exe",
+    },
 }
+
 windows_sparse_checkout = [
     "/*",
     "!/tests/wpt/metadata",
@@ -165,7 +184,7 @@ def linux_tidy_unit_docs():
             ./etc/ci/lockfile_changed.sh
             ./etc/ci/check_no_panic.sh
 
-            ./mach doc
+            RUSTDOCFLAGS="--disable-minification" ./mach doc
             cd target/doc
             git init
             time git add .
@@ -209,7 +228,7 @@ def macos_unit():
         macos_build_task("Dev build + unit tests")
         .with_treeherder("macOS x64", "Unit")
         .with_script("""
-            ./mach build --dev
+            ./mach build --dev --verbose
             ./mach test-unit
             ./mach package --dev
             ./etc/ci/lockfile_changed.sh
@@ -237,6 +256,20 @@ def with_rust_nightly():
     )
 
 
+def android_arm32_dev_from_macos():
+    return (
+        macos_build_task("Dev build (macOS)")
+        .with_treeherder("Android ARMv7")
+        .with_script("""
+            export HOST_CC="$(brew --prefix llvm)/bin/clang"
+            export HOST_CXX="$(brew --prefix llvm)/bin/clang++"
+            ./mach bootstrap-android --accept-all-licences --build
+            ./mach build --android --dev --verbose
+        """)
+        .find_or_create("android_arm32_dev.macos." + CONFIG.git_sha)
+    )
+
+
 def android_arm32_dev():
     return (
         android_build_task("Dev build")
@@ -247,6 +280,30 @@ def android_arm32_dev():
             python ./etc/ci/check_dynamic_symbols.py
         """)
         .find_or_create("android_arm32_dev." + CONFIG.git_sha)
+    )
+
+
+def android_nightly():
+    return (
+        android_build_task("Nightly build and upload")
+        .with_treeherder("Android Nightlies")
+        .with_features("taskclusterProxy")
+        .with_scopes("secrets:get:project/servo/s3-upload-credentials")
+        .with_script("""
+            ./mach build --release --android
+            ./mach package --release --android --maven
+            ./mach build --release --target i686-linux-android
+            ./mach package --release --target i686-linux-android --maven
+            ./mach upload-nightly android --secret-from-taskcluster
+            ./mach upload-nightly maven --secret-from-taskcluster
+        """)
+        .with_artifacts(
+            "/repo/target/android/armv7-linux-androideabi/release/servoapp.apk",
+            "/repo/target/android/armv7-linux-androideabi/release/servoview.aar",
+            "/repo/target/android/i686-linux-android/release/servoapp.apk",
+            "/repo/target/android/i686-linux-android/release/servoview.aar",
+        )
+        .find_or_create("build.android_nightlies." + CONFIG.git_sha)
     )
 
 
@@ -299,6 +356,20 @@ def android_x86_wpt():
     )
 
 
+def windows_x86():
+    return (
+        windows_build_task("Dev build", package=False, arch="x86")
+        .with_treeherder("Windows x86")
+        .with_env(**{
+            "VCVARSALL_PATH": "C:\\Program Files (x86)\\Microsoft Visual Studio\\2017\\BuildTools\\VC\\Auxiliary\\Build"
+        })
+        .with_script(
+            "python mach build --dev --target i686-pc-windows-msvc",
+        )
+        .find_or_create("build.windows_x86_dev." + CONFIG.git_sha)
+    )
+
+
 def windows_unit():
     return (
         windows_build_task("Dev build + unit tests")
@@ -330,26 +401,34 @@ def windows_release():
     )
 
 
+def windows_nightly():
+    return (
+        windows_build_task("Nightly build and upload")
+        .with_treeherder("Windows x64", "Nightly")
+        .with_features("taskclusterProxy")
+        .with_scopes("secrets:get:project/servo/s3-upload-credentials")
+        .with_script("mach fetch",
+                     "mach build --release",
+                     "mach package --release",
+                     "mach upload-nightly windows-msvc --secret-from-taskcluster")
+        .with_artifacts("repo/target/release/msi/Servo.exe",
+                        "repo/target/release/msi/Servo.zip")
+        .find_or_create("build.windows_x64_nightly." + CONFIG.git_sha)
+    )
+
+
 def linux_nightly():
     return (
         linux_build_task("Nightly build and upload")
         .with_treeherder("Linux x64", "Nightly")
         .with_features("taskclusterProxy")
-        .with_scopes("secrets:get:project/servo/s3-upload")
-        .with_env(PY=r"""if 1:
-            import urllib, json
-            url = "http://taskcluster/secrets/v1/secret/project/servo/s3-upload"
-            secret = json.load(urllib.urlopen(url))["secret"]
-            open("/root/.aws/credentials", "w").write(secret["credentials_file"])
-        """)
+        .with_scopes("secrets:get:project/servo/s3-upload-credentials")
         # Not reusing the build made for WPT because it has debug assertions
-        .with_script("""
-            ./mach build --release
-            ./mach package --release
-            mkdir /root/.aws
-            python -c "$PY"
-            ./mach upload-nightly linux
-        """)
+        .with_script(
+            "./mach build --release",
+            "./mach package --release",
+            "./mach upload-nightly linux --secret-from-taskcluster",
+        )
         .with_artifacts("/repo/target/release/servo-tech-demo.tar.gz")
         .find_or_create("build.linux_x64_nightly" + CONFIG.git_sha)
     )
@@ -376,12 +455,61 @@ def linux_wpt():
                total_chunks=2, processes=24)
 
 
+def macos_nightly():
+    return (
+        macos_build_task("Nightly build and upload")
+        .with_treeherder("macOS x64", "Nightly")
+        .with_features("taskclusterProxy")
+        .with_scopes(
+            "secrets:get:project/servo/s3-upload-credentials",
+            "secrets:get:project/servo/github-homebrew-token",
+        )
+        .with_script(
+            "./mach build --release",
+            "./mach package --release",
+            "./mach upload-nightly mac --secret-from-taskcluster",
+        )
+        .with_artifacts("repo/target/release/servo-tech-demo.dmg")
+        .find_or_create("build.mac_x64_nightly." + CONFIG.git_sha)
+    )
+
+
+def update_wpt():
+    # Reuse the release build that was made for landing the PR
+    build_task = decisionlib.Task.find("build.macos_x64_release." + CONFIG.git_sha)
+    update_task = (
+        macos_task("WPT update")
+        .with_python2()
+        .with_treeherder("macOS x64", "WPT update")
+        .with_features("taskclusterProxy")
+        .with_scopes("secrets:get:project/servo/wpt-sync")
+        .with_index_and_artifacts_expire_in(log_artifacts_expire_in)
+        .with_max_run_time_minutes(5 * 60)
+    )
+    return (
+        with_homebrew(update_task, [
+            "etc/taskcluster/macos/Brewfile-wpt",
+            "etc/taskcluster/macos/Brewfile-gstreamer",
+        ])
+        .with_repo()
+        .with_curl_artifact_script(build_task, "target.tar.gz")
+        .with_script("""
+            export PKG_CONFIG_PATH="$(brew --prefix libffi)/lib/pkgconfig/"
+            tar -xzf target.tar.gz
+            ./etc/ci/update-wpt-checkout fetch-and-update-expectations
+            ./etc/ci/update-wpt-checkout open-pr
+            ./etc/ci/update-wpt-checkout cleanup
+        """)
+        .find_or_create("wpt_update." + CONFIG.git_sha)
+    )
+
+
 def macos_wpt():
     build_task = (
         macos_build_task("Release build")
         .with_treeherder("macOS x64", "Release")
         .with_script("""
-            ./mach build --release
+            ./mach build --release --verbose
             ./etc/ci/lockfile_changed.sh
             tar -czf target.tar.gz \
                 target/release/servo \
@@ -393,9 +521,15 @@ def macos_wpt():
         .find_or_create("build.macos_x64_release." + CONFIG.git_sha)
     )
     def macos_run_task(name):
-        return macos_task(name).with_python2()
+        task = macos_task(name).with_python2()
+        return (
+            with_homebrew(task, ["etc/taskcluster/macos/Brewfile-gstreamer"])
+            .with_script("""
+                export PKG_CONFIG_PATH="$(brew --prefix libffi)/lib/pkgconfig/"
+            """)
+        )
     wpt_chunks("macOS x64", macos_run_task, build_task, repo_dir="repo",
-               total_chunks=6, processes=4, chunks=[1])
+               total_chunks=6, processes=4)
 
 
 def wpt_chunks(platform, make_chunk_task, build_task, total_chunks, processes,
@@ -410,11 +544,12 @@ def wpt_chunks(platform, make_chunk_task, build_task, total_chunks, processes,
             .with_curl_artifact_script(build_task, "target.tar.gz")
             .with_script("tar -xzf target.tar.gz")
             .with_index_and_artifacts_expire_in(log_artifacts_expire_in)
-            .with_max_run_time_minutes(60)
+            .with_max_run_time_minutes(90)
             .with_env(
                 TOTAL_CHUNKS=str(total_chunks),
                 THIS_CHUNK=str(this_chunk),
                 PROCESSES=str(processes),
+                GST_DEBUG="3",
             )
         )
         if this_chunk == chunks[-1]:
@@ -433,6 +568,11 @@ def wpt_chunks(platform, make_chunk_task, build_task, total_chunks, processes,
                     tests/wpt/mozilla/tests/css/per_glyph_font_fallback_a.html \
                     tests/wpt/mozilla/tests/css/img_simple.html \
                     tests/wpt/mozilla/tests/mozilla/secure.https.html \
+                    | cat
+                time ./mach test-wpt --release --processes 1 --product=servodriver \
+                    --headless --log-raw test-bluetooth.log \
+                    --log-errorsummary bluetooth-errorsummary.log \
+                    bluetooth \
                     | cat
             """)
         # `test-wpt` is piped into `cat` so that stdout is not a TTY
@@ -554,31 +694,76 @@ def android_build_task(name):
     )
 
 
-def windows_build_task(name):
-    return (
+def windows_build_task(name, package=True, arch="x86_64"):
+    hashes = {
+        "devel": {
+            "x86_64": "b13ea68c1365098c66871f0acab7fd3daa2f2795b5e893fcbb5cd7253f2c08fa",
+            "x86": "50a18d050cdbb0779cd00607cc00a90f24fac48f2fb6c622ade6f23f050feb7a",
+        },
+        "non-devel": {
+            "x86_64": "f4f20c713766ed6718b914b9ae57ed993a59ffe194e6ef530c8547508b4484d8",
+            "x86": "52692c12ba8c3f59b5a289050e146d34d8374ab32b9f5070f7d1e37809656068",
+        },
+    }
+    version = "1.14.3"
+    task = (
         windows_task(name)
-        .with_max_run_time_minutes(60)
-        .with_env(**build_env, **windows_build_env)
+        .with_max_run_time_minutes(90)
+        .with_env(
+            **build_env,
+            **windows_build_env[arch],
+            **windows_build_env["all"]
+        )
         .with_repo(sparse_checkout=windows_sparse_checkout)
         .with_python2()
+        .with_directory_mount(
+            "https://www.python.org/ftp/python/3.7.3/python-3.7.3-embed-amd64.zip",
+            sha256="6de14c9223226cf0cd8c965ecb08c51d62c770171a256991b4fddc25188cfa8e",
+            path="python3",
+        )
         .with_rustup()
         .with_repacked_msi(
-            url="https://gstreamer.freedesktop.org/data/pkg/windows/" +
-                "1.14.3/gstreamer-1.0-devel-x86_64-1.14.3.msi",
-            sha256="b13ea68c1365098c66871f0acab7fd3daa2f2795b5e893fcbb5cd7253f2c08fa",
+            url=("https://gstreamer.freedesktop.org/data/pkg/windows/" +
+                 "%s/gstreamer-1.0-%s-%s.msi" % (version, arch, version)),
+            sha256=hashes["non-devel"][arch],
             path="gst",
         )
-        .with_directory_mount(
-            "https://github.com/wixtoolset/wix3/releases/download/wix3111rtm/wix311-binaries.zip",
-            sha256="37f0a533b0978a454efb5dc3bd3598becf9660aaf4287e55bf68ca6b527d051d",
-            path="wix",
+        .with_repacked_msi(
+            url=("https://gstreamer.freedesktop.org/data/pkg/windows/" +
+                 "%s/gstreamer-1.0-devel-%s-%s.msi" % (version, arch, version)),
+            sha256=hashes["devel"][arch],
+            path="gst",
         )
-        .with_path_from_homedir("wix")
     )
+    if package:
+        task = (
+            task
+            .with_directory_mount(
+                "https://github.com/wixtoolset/wix3/releases/download/wix3111rtm/wix311-binaries.zip",
+                sha256="37f0a533b0978a454efb5dc3bd3598becf9660aaf4287e55bf68ca6b527d051d",
+                path="wix",
+            )
+            .with_path_from_homedir("wix")
+        )
+    return task
+
+
+def with_homebrew(task, brewfiles):
+        task = task.with_script("""
+            mkdir -p "$HOME/homebrew"
+            export PATH="$HOME/homebrew/bin:$PATH"
+            which brew || curl -L https://github.com/Homebrew/brew/tarball/master \
+                | tar xz --strip 1 -C "$HOME/homebrew"
+        """)
+        for brewfile in brewfiles:
+            task = task.with_script("""
+                time brew bundle install --no-upgrade --file={brewfile}
+            """.format(brewfile=brewfile))
+        return task
 
 
 def macos_build_task(name):
-    return (
+    build_task = (
         macos_task(name)
         # Allow long runtime in case the cache expired for all those Homebrew dependencies
         .with_max_run_time_minutes(60 * 2)
@@ -586,15 +771,19 @@ def macos_build_task(name):
         .with_repo()
         .with_python2()
         .with_rustup()
+        # Debugging for surprising generic-worker behaviour
+        .with_early_script("ls")
+        .with_script("ls target || true")
+    )
+    return (
+        with_homebrew(build_task, [
+            "etc/taskcluster/macos/Brewfile",
+            "etc/taskcluster/macos/Brewfile-gstreamer",
+        ])
         .with_script("""
-            mkdir -p "$HOME/homebrew"
-            export PATH="$HOME/homebrew/bin:$PATH"
-            which brew || curl -L https://github.com/Homebrew/brew/tarball/master \
-                | tar xz --strip 1 -C "$HOME/homebrew"
-
-            time brew bundle install --no-upgrade --file=etc/taskcluster/macos/Brewfile
             export OPENSSL_INCLUDE_DIR="$(brew --prefix openssl)/include"
             export OPENSSL_LIB_DIR="$(brew --prefix openssl)/lib"
+            export PKG_CONFIG_PATH="$(brew --prefix libffi)/lib/pkgconfig/"
         """)
 
         .with_directory_mount(
@@ -616,9 +805,63 @@ def macos_build_task(name):
     )
 
 
+def magicleap_build_task(name, build_type):
+    return (
+        macos_build_task(name)
+        .with_treeherder("MagicLeap aarch64", build_type)
+        .with_directory_mount(
+            "https://servo-deps.s3.amazonaws.com/magicleap/macos-sdk-v0.17.0.tar.gz",
+            sha256="e81de47ad963891ac68768d93ab5a36ed3af3a3efebb4dbc4db2e65647d57655",
+            path="magicleap"
+        )
+        .with_directory_mount(
+            "https://servo-deps.s3.amazonaws.com/magicleap/TempSharedCert.zip",
+            sha256="cdc2d26bc87ecf1cd8133df4e72c4eca5df7ddd815d0adf3045460253c1fe123",
+            path="magicleap"
+        )
+        # Early script in order to run with the initial $PWD
+        .with_early_script("""
+            export MAGICLEAP_SDK="$PWD/magicleap/v0.17.0"
+            export MLCERT="$PWD/magicleap/TempSharedCert.cert"
+        """)
+        .with_script("""
+            unset OPENSSL_INCLUDE_DIR
+            unset OPENSSL_LIB_DIR
+            export HOST_CC=$(brew --prefix llvm)/bin/clang
+            export HOST_CXX=$(brew --prefix llvm)/bin/clang++
+        """)
+    )
+
+
+def magicleap_dev():
+    return (
+        magicleap_build_task("Dev build", "Dev")
+        .with_script("""
+            ./mach build --magicleap --dev
+            env -u DYLD_LIBRARY_PATH ./mach package --magicleap --dev
+        """)
+        .find_or_create("build.magicleap_dev." + CONFIG.git_sha)
+    )
+
+
+def magicleap_nightly():
+    return (
+        magicleap_build_task("Nightly build and upload", "Release")
+        .with_features("taskclusterProxy")
+        .with_scopes("secrets:get:project/servo/s3-upload-credentials")
+        .with_script("""
+            ./mach build --magicleap --release
+            env -u DYLD_LIBRARY_PATH ./mach package --magicleap --release
+            ./mach upload-nightly magicleap --secret-from-taskcluster
+        """)
+        .with_artifacts("repo/target/magicleap/aarch64-linux-android/release/Servo2D.mpk")
+        .find_or_create("build.magicleap_nightly." + CONFIG.git_sha)
+    )
+
+
 CONFIG.task_name_template = "Servo: %s"
 CONFIG.index_prefix = "project.servo.servo"
-CONFIG.docker_image_buil_worker_type = "servo-docker-worker"
+CONFIG.docker_image_build_worker_type = "servo-docker-worker"
 CONFIG.docker_images_expire_in = build_dependencies_artifacts_expire_in
 CONFIG.repacked_msi_files_expire_in = build_dependencies_artifacts_expire_in
 

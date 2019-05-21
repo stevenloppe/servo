@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use crate::compartments::{AlreadyInCompartment, InCompartment};
 use crate::dom::bindings::codegen::Bindings::ServiceWorkerContainerBinding::RegistrationOptions;
 use crate::dom::bindings::codegen::Bindings::ServiceWorkerContainerBinding::{
     ServiceWorkerContainerMethods, Wrap,
@@ -52,11 +53,15 @@ impl ServiceWorkerContainerMethods for ServiceWorkerContainer {
     }
 
     #[allow(unrooted_must_root)] // Job is unrooted
-    /// https://w3c.github.io/ServiceWorker/#service-worker-container-register-method and - A
+    /// https://w3c.github.io/ServiceWorker/#navigator-service-worker-register and - A
     /// https://w3c.github.io/ServiceWorker/#start-register-algorithm - B
     fn Register(&self, script_url: USVString, options: &RegistrationOptions) -> Rc<Promise> {
         // A: Step 1
-        let promise = Promise::new(&*self.global());
+        let in_compartment_proof = AlreadyInCompartment::assert(&*self.global());
+        let promise = Promise::new_in_current_compartment(
+            &*self.global(),
+            InCompartment::Already(&in_compartment_proof),
+        );
         let USVString(ref script_url) = script_url;
         let api_base_url = self.global().api_base_url();
         // A: Step 3-5
@@ -122,6 +127,7 @@ impl ServiceWorkerContainerMethods for ServiceWorkerContainer {
             scope,
             script_url,
             promise.clone(),
+            options.type_,
             &*self.client,
         );
         // Job is unrooted here, do not do anything other than immediately scheduling

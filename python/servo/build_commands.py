@@ -18,6 +18,7 @@ import subprocess
 import sys
 import urllib
 import zipfile
+import stat
 
 from time import time
 
@@ -211,11 +212,6 @@ class MachCommands(CommandBase):
             print("Please specify either --target or --android.")
             sys.exit(1)
 
-        # https://github.com/servo/servo/issues/22069
-        if debug_mozjs and magicleap:
-            print("Please specify either --debug-mozjs or --magicleap.")
-            sys.exit(1)
-
         if android:
             target = self.config["android"]["target"]
 
@@ -282,6 +278,7 @@ class MachCommands(CommandBase):
 
             opts += ["--target", target]
 
+        env = self.build_env(target=target, is_build=True)
         self.ensure_bootstrapped(target=target)
         self.ensure_clobbered()
 
@@ -289,6 +286,10 @@ class MachCommands(CommandBase):
 
         if debug_mozjs:
             features += ["debugmozjs"]
+
+        if with_frame_pointer:
+            env['RUSTFLAGS'] = env.get('RUSTFLAGS', "") + " -C force-frame-pointers=yes"
+            features += ["profilemozjs"]
 
         if self.config["build"]["webgl-backtrace"]:
             features += ["webgl-backtrace"]
@@ -299,14 +300,20 @@ class MachCommands(CommandBase):
             opts += ["--features", "%s" % ' '.join(features)]
 
         build_start = time()
-        env = self.build_env(target=target, is_build=True)
         env["CARGO_TARGET_DIR"] = target_path
 
         if with_debug_assertions:
             env['RUSTFLAGS'] = env.get('RUSTFLAGS', "") + " -C debug_assertions"
 
-        if with_frame_pointer:
-            env['RUSTFLAGS'] = env.get('RUSTFLAGS', "") + " -C force-frame-pointers=yes"
+        if sys.platform == "win32":
+            env["CC"] = "clang-cl.exe"
+            env["CXX"] = "clang-cl.exe"
+
+        host = host_triple()
+        if 'apple-darwin' in host and (not target or target == host):
+            if 'CXXFLAGS' not in env:
+                env['CXXFLAGS'] = ''
+            env["CXXFLAGS"] += "-mmacosx-version-min=10.10"
 
         if android:
             if "ANDROID_NDK" not in env:
@@ -333,15 +340,15 @@ class MachCommands(CommandBase):
             shutil.copy(path.join(self.android_support_dir(), "openssl.makefile"), openssl_dir)
             shutil.copy(path.join(self.android_support_dir(), "openssl.sh"), openssl_dir)
 
-            # Check if the NDK version is 12
+            # Check if the NDK version is 15
             if not os.path.isfile(path.join(env["ANDROID_NDK"], 'source.properties')):
                 print("ANDROID_NDK should have file `source.properties`.")
                 print("The environment variable ANDROID_NDK may be set at a wrong path.")
                 sys.exit(1)
             with open(path.join(env["ANDROID_NDK"], 'source.properties')) as ndk_properties:
                 lines = ndk_properties.readlines()
-                if lines[1].split(' = ')[1].split('.')[0] != '12':
-                    print("Currently only support NDK 12.")
+                if lines[1].split(' = ')[1].split('.')[0] != '15':
+                    print("Currently only support NDK 15. Please re-run `./mach bootstrap-android`.")
                     sys.exit(1)
 
             env["RUST_TARGET"] = target
@@ -382,13 +389,20 @@ class MachCommands(CommandBase):
             env['PATH'] = (path.join(llvm_toolchain, "bin") + ':'
                            + path.join(gcc_toolchain, "bin") + ':'
                            + env['PATH'])
-            env['ANDROID_SYSROOT'] = path.join(env['ANDROID_NDK'], "platforms",
-                                               android_platform, "arch-" + android_arch)
+            env['ANDROID_SYSROOT'] = path.join(env['ANDROID_NDK'], "sysroot")
             support_include = path.join(env['ANDROID_NDK'], "sources", "android", "support", "include")
+            cpufeatures_include = path.join(env['ANDROID_NDK'], "sources", "android", "cpufeatures")
             cxx_include = path.join(env['ANDROID_NDK'], "sources", "cxx-stl",
-                                    "llvm-libc++", "libcxx", "include")
+                                    "llvm-libc++", "include")
             clang_include = path.join(llvm_toolchain, "lib64", "clang", "3.8", "include")
+            cxxabi_include = path.join(env['ANDROID_NDK'], "sources", "cxx-stl",
+                                       "llvm-libc++abi", "include")
             sysroot_include = path.join(env['ANDROID_SYSROOT'], "usr", "include")
+            arch_include = path.join(sysroot_include, android_toolchain_name)
+            android_platform_dir = path.join(env['ANDROID_NDK'], "platforms", android_platform, "arch-" + android_arch)
+            arch_libs = path.join(android_platform_dir, "usr", "lib")
+            clang_include = path.join(llvm_toolchain, "lib64", "clang", "5.0", "include")
+            android_api = android_platform.replace('android-', '')
             env['HOST_CC'] = host_cc
             env['HOST_CXX'] = host_cxx
             env['HOST_CFLAGS'] = ''
@@ -397,6 +411,9 @@ class MachCommands(CommandBase):
             env['CPP'] = path.join(llvm_toolchain, "bin", "clang") + " -E"
             env['CXX'] = path.join(llvm_toolchain, "bin", "clang++")
             env['ANDROID_TOOLCHAIN'] = gcc_toolchain
+            env['ANDROID_TOOLCHAIN_DIR'] = gcc_toolchain
+            env['ANDROID_VERSION'] = android_api
+            env['ANDROID_PLATFORM_DIR'] = android_platform_dir
             env['GCC_TOOLCHAIN'] = gcc_toolchain
             gcc_toolchain_bin = path.join(gcc_toolchain, android_toolchain_name, "bin")
             env['AR'] = path.join(gcc_toolchain_bin, "ar")
@@ -419,21 +436,40 @@ class MachCommands(CommandBase):
                 "--sysroot=" + env['ANDROID_SYSROOT'],
                 "--gcc-toolchain=" + gcc_toolchain,
                 "-isystem", sysroot_include,
-                "-L" + gcc_libs])
+                "-I" + arch_include,
+                "-B" + arch_libs,
+                "-L" + arch_libs,
+                "-D__ANDROID_API__=" + android_api,
+            ])
             env['CXXFLAGS'] = ' '.join([
                 "--target=" + target,
                 "--sysroot=" + env['ANDROID_SYSROOT'],
                 "--gcc-toolchain=" + gcc_toolchain,
-                "-I" + support_include,
+                "-I" + cpufeatures_include,
                 "-I" + cxx_include,
                 "-I" + clang_include,
                 "-isystem", sysroot_include,
+                "-I" + cxxabi_include,
+                "-I" + clang_include,
+                "-I" + arch_include,
+                "-I" + support_include,
                 "-L" + gcc_libs,
+                "-B" + arch_libs,
+                "-L" + arch_libs,
+                "-D__ANDROID_API__=" + android_api,
                 "-D__STDC_CONSTANT_MACROS",
-                "-D__NDK_FPABI__="])
-            env["NDK_ANDROID_VERSION"] = android_platform.replace("android-", "")
-            env['CPPFLAGS'] = ' '.join(["--sysroot", env['ANDROID_SYSROOT']])
-            env["CMAKE_ANDROID_ARCH_ABI"] = android_lib
+                "-D__NDK_FPABI__=",
+            ])
+            env['CPPFLAGS'] = ' '.join([
+                "--target=" + target,
+                "--sysroot=" + env['ANDROID_SYSROOT'],
+                "-I" + arch_include,
+            ])
+            env["NDK_ANDROID_VERSION"] = android_api
+            env["ANDROID_ABI"] = android_lib
+            env["ANDROID_PLATFORM"] = android_platform
+            env["ANDROID_TOOLCHAIN_NAME"] = "clang"
+            env["NDK_CMAKE_TOOLCHAIN_FILE"] = path.join(env['ANDROID_NDK'], "build", "cmake", "android.toolchain.cmake")
             env["CMAKE_TOOLCHAIN_FILE"] = path.join(self.android_support_dir(), "toolchain.cmake")
             # Set output dir for gradle aar files
             aar_out_dir = self.android_aar_dir()
@@ -446,7 +482,7 @@ class MachCommands(CommandBase):
             # Build the name of the package containing all GStreamer dependencies
             # according to the build target.
             gst_lib = "gst-build-{}".format(self.config["android"]["lib"])
-            gst_lib_zip = "gstreamer-{}-1.14.3-20181105-103937.zip".format(self.config["android"]["lib"])
+            gst_lib_zip = "gstreamer-{}-1.16.0-20190517-095630.zip".format(self.config["android"]["lib"])
             gst_dir = os.path.join(target_path, "gstreamer")
             gst_lib_path = os.path.join(gst_dir, gst_lib)
             pkg_config_path = os.path.join(gst_lib_path, "pkgconfig")
@@ -482,6 +518,8 @@ class MachCommands(CommandBase):
             ml_sdk = env.get("MAGICLEAP_SDK")
             if not ml_sdk:
                 raise Exception("Magic Leap builds need the MAGICLEAP_SDK environment variable")
+            if not os.path.exists(ml_sdk):
+                raise Exception("Path specified by MAGICLEAP_SDK does not exist.")
 
             ml_support = path.join(self.get_top_dir(), "support", "magicleap")
 
@@ -520,7 +558,7 @@ class MachCommands(CommandBase):
 
             # The toolchain commands
             env.setdefault("AR", path.join(env["ANDROID_TOOLCHAIN_DIR"], "bin", "aarch64-linux-android-ar"))
-            env.setdefault("AS", path.join(env["ANDROID_TOOLCHAIN_DIR"], "bin", "aarch64-linux-android-as"))
+            env.setdefault("AS", path.join(env["ANDROID_TOOLCHAIN_DIR"], "bin", "aarch64-linux-android-clang"))
             env.setdefault("CC", path.join(env["ANDROID_TOOLCHAIN_DIR"], "bin", "aarch64-linux-android-clang"))
             env.setdefault("CPP", path.join(env["ANDROID_TOOLCHAIN_DIR"], "bin", "aarch64-linux-android-clang -E"))
             env.setdefault("CXX", path.join(env["ANDROID_TOOLCHAIN_DIR"], "bin", "aarch64-linux-android-clang++"))
@@ -533,14 +571,15 @@ class MachCommands(CommandBase):
             # Undo all of that when compiling build tools for the host
             env.setdefault("HOST_CFLAGS", "")
             env.setdefault("HOST_CXXFLAGS", "")
-            env.setdefault("HOST_CC", "gcc")
-            env.setdefault("HOST_CXX", "g++")
+            env.setdefault("HOST_CC", "/usr/local/opt/llvm/bin/clang")
+            env.setdefault("HOST_CXX", "/usr/local/opt/llvm/bin/clang++")
             env.setdefault("HOST_LD", "ld")
 
             # Some random build configurations
             env.setdefault("HARFBUZZ_SYS_NO_PKG_CONFIG", "1")
             env.setdefault("PKG_CONFIG_ALLOW_CROSS", "1")
             env.setdefault("CMAKE_TOOLCHAIN_FILE", path.join(ml_support, "toolchain.cmake"))
+            env.setdefault("_LIBCPP_INLINE_VISIBILITY", "__attribute__((__always_inline__))")
 
             # The Open SSL configuration
             env.setdefault("OPENSSL_DIR", path.join(target_path, target, "native", "openssl"))
@@ -592,6 +631,129 @@ class MachCommands(CommandBase):
                 for ssl_lib in ["libcryptoMD.dll", "libsslMD.dll"]:
                     shutil.copy(path.join(env['OPENSSL_LIB_DIR'], "../bin" + msvc_x64, ssl_lib),
                                 servo_exe_dir)
+                # Search for the generated nspr4.dll
+                build_path = path.join(servo_exe_dir, "build")
+
+                def package_generated_shared_libraries(libs, build_path, servo_exe_dir):
+                    for root, dirs, files in os.walk(build_path):
+                        remaining_libs = list(libs)
+                        for lib in libs:
+                            if lib in files:
+                                shutil.copy(path.join(root, lib), servo_exe_dir)
+                                remaining_libs.remove(lib)
+                                continue
+                        libs = remaining_libs
+                        if not libs:
+                            return
+                    for lib in libs:
+                        print("WARNING: could not find " + lib)
+
+                package_generated_shared_libraries(["nspr4.dll", "libEGL.dll"], build_path, servo_exe_dir)
+
+                # copy needed gstreamer DLLs in to servo.exe dir
+                gst_x64 = "X86_64" if msvc_x64 == "64" else "X86"
+                gst_root = ""
+                gst_default_path = path.join("C:\\gstreamer\\1.0", gst_x64)
+                gst_env = "GSTREAMER_1_0_ROOT_" + gst_x64
+                if os.path.exists(path.join(gst_default_path, "bin", "libffi-7.dll")) or \
+                   os.path.exists(path.join(gst_default_path, "bin", "ffi-7.dll")):
+                    gst_root = gst_default_path
+                elif os.environ.get(gst_env) is not None:
+                    gst_root = os.environ.get(gst_env)
+                else:
+                    print("Could not found GStreamer installation directory.")
+                    status = 1
+                gst_dlls = [
+                    ["libffi-7.dll", "ffi-7.dll"],
+                    ["libgio-2.0-0.dll", "gio-2.0-0.dll"],
+                    ["libglib-2.0-0.dll", "glib-2.0-0.dll"],
+                    ["libgmodule-2.0-0.dll", "gmodule-2.0-0.dll"],
+                    ["libgobject-2.0-0.dll", "gobject-2.0-0.dll"],
+                    ["libgstapp-1.0-0.dll", "gstapp-1.0-0.dll"],
+                    ["libgstaudio-1.0-0.dll", "gstaudio-1.0-0.dll"],
+                    ["libgstbase-1.0-0.dll", "gstbase-1.0-0.dll"],
+                    ["libgstgl-1.0-0.dll", "gstgl-1.0-0.dll"],
+                    ["libgstpbutils-1.0-0.dll", "gstpbutils-1.0-0.dll"],
+                    ["libgstplayer-1.0-0.dll", "gstplayer-1.0-0.dll"],
+                    ["libgstreamer-1.0-0.dll", "gstreamer-1.0-0.dll"],
+                    ["libgstrtp-1.0-0.dll", "gstrtp-1.0-0.dll"],
+                    ["libgstsdp-1.0-0.dll", "gstsdp-1.0-0.dll"],
+                    ["libgsttag-1.0-0.dll", "gsttag-1.0-0.dll"],
+                    ["libgstvideo-1.0-0.dll", "gstvideo-1.0-0.dll"],
+                    ["libgstwebrtc-1.0-0.dll", "gstwebrtc-1.0-0.dll"],
+                    ["libintl-8.dll", "intl-8.dll"],
+                    ["liborc-0.4-0.dll", "orc-0.4-0.dll"],
+                    ["libwinpthread-1.dll", "winpthread-1.dll"],
+                    ["libz.dll", "libz-1.dll", "z-1.dll"]
+                ]
+                if gst_root:
+                    for gst_lib in gst_dlls:
+                        if isinstance(gst_lib, str):
+                            gst_lib = [gst_lib]
+                        for lib in gst_lib:
+                            try:
+                                shutil.copy(path.join(gst_root, "bin", lib),
+                                            servo_exe_dir)
+                                break
+                            except:
+                                pass
+                        else:
+                            print("ERROR: could not find required GStreamer DLL: " + str(gst_lib))
+                            sys.exit(1)
+
+                # copy some MSVC DLLs to servo.exe dir
+                msvc_redist_dir = None
+                vs_platform = os.environ.get("PLATFORM", "").lower()
+                vc_dir = os.environ.get("VCINSTALLDIR", "")
+                vs_version = os.environ.get("VisualStudioVersion", "")
+                msvc_deps = [
+                    "api-ms-win-crt-runtime-l1-1-0.dll",
+                    "msvcp140.dll",
+                    "vcruntime140.dll",
+                ]
+                # Check if it's Visual C++ Build Tools or Visual Studio 2015
+                vs14_vcvars = path.join(vc_dir, "vcvarsall.bat")
+                is_vs14 = True if os.path.isfile(vs14_vcvars) or vs_version == "14.0" else False
+                if is_vs14:
+                    msvc_redist_dir = path.join(vc_dir, "redist", vs_platform, "Microsoft.VC140.CRT")
+                elif vs_version == "15.0":
+                    redist_dir = path.join(os.environ.get("VCINSTALLDIR", ""), "Redist", "MSVC")
+                    if os.path.isdir(redist_dir):
+                        for p in os.listdir(redist_dir)[::-1]:
+                            redist_path = path.join(redist_dir, p)
+                            for v in ["VC141", "VC150"]:
+                                # there are two possible paths
+                                # `x64\Microsoft.VC*.CRT` or `onecore\x64\Microsoft.VC*.CRT`
+                                redist1 = path.join(redist_path, vs_platform, "Microsoft.{}.CRT".format(v))
+                                redist2 = path.join(redist_path, "onecore", vs_platform, "Microsoft.{}.CRT".format(v))
+                                if os.path.isdir(redist1):
+                                    msvc_redist_dir = redist1
+                                    break
+                                elif os.path.isdir(redist2):
+                                    msvc_redist_dir = redist2
+                                    break
+                            if msvc_redist_dir:
+                                break
+                if msvc_redist_dir:
+                    redist_dirs = [
+                        msvc_redist_dir,
+                        path.join(os.environ["WindowsSdkDir"], "Redist", "ucrt", "DLLs", vs_platform),
+                    ]
+                    for msvc_dll in msvc_deps:
+                        dll_found = False
+                        for dll_dir in redist_dirs:
+                            dll = path.join(dll_dir, msvc_dll)
+                            servo_dir_dll = path.join(servo_exe_dir, msvc_dll)
+                            if os.path.isfile(dll):
+                                if os.path.isfile(servo_dir_dll):
+                                    # avoid permission denied error when overwrite dll in servo build directory
+                                    os.chmod(servo_dir_dll, stat.S_IWUSR)
+                                shutil.copy(dll, servo_exe_dir)
+                                dll_found = True
+                                break
+                        if not dll_found:
+                            print("DLL file `{}` not found!".format(msvc_dll))
+                            status = 1
 
             elif sys.platform == "darwin":
                 # On the Mac, set a lovely icon. This makes it easier to pick out the Servo binary in tools
@@ -639,4 +801,4 @@ class MachCommands(CommandBase):
             opts += ["-v"]
         opts += params
         return check_call(["cargo", "clean"] + opts,
-                          env=self.build_env(), cwd=self.ports_servo_crate(), verbose=verbose)
+                          env=self.build_env(), cwd=self.ports_glutin_crate(), verbose=verbose)

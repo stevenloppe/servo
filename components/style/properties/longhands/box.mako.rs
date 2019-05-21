@@ -34,6 +34,17 @@ ${helpers.single_keyword(
     spec="Internal (not web-exposed)",
 )}
 
+// An internal-only property for elements in a top layer
+// https://fullscreen.spec.whatwg.org/#top-layer
+${helpers.single_keyword(
+    "-servo-top-layer",
+    "none top",
+    products="servo",
+    animation_value_type="none",
+    enabled_in="ua",
+    spec="Internal (not web-exposed)",
+)}
+
 ${helpers.single_keyword(
     "position",
     "static absolute relative fixed sticky",
@@ -326,11 +337,11 @@ ${helpers.predefined_type(
     "Position",
     "computed::Position::zero()",
     vector=True,
+    allow_empty=True,
     products="gecko",
     gecko_pref="layout.css.scroll-snap.enabled",
     spec="Nonstandard (https://developer.mozilla.org/en-US/docs/Web/CSS/scroll-snap-destination)",
     animation_value_type="discrete",
-    allow_empty="NotInitial",
 )}
 
 <% transform_extra_prefixes = "moz:layout.css.prefixes.transforms webkit" %>
@@ -354,7 +365,7 @@ ${helpers.predefined_type(
     "generics::transform::Rotate::None",
     animation_value_type="ComputedValue",
     boxed=True,
-    flags="CREATES_STACKING_CONTEXT FIXPOS_CB",
+    flags="CREATES_STACKING_CONTEXT FIXPOS_CB CAN_ANIMATE_ON_COMPOSITOR",
     gecko_pref="layout.css.individual-transform.enabled",
     spec="https://drafts.csswg.org/css-transforms-2/#individual-transforms",
     servo_restyle_damage = "reflow_out_of_flow",
@@ -366,7 +377,7 @@ ${helpers.predefined_type(
     "generics::transform::Scale::None",
     animation_value_type="ComputedValue",
     boxed=True,
-    flags="CREATES_STACKING_CONTEXT FIXPOS_CB",
+    flags="CREATES_STACKING_CONTEXT FIXPOS_CB CAN_ANIMATE_ON_COMPOSITOR",
     gecko_pref="layout.css.individual-transform.enabled",
     spec="https://drafts.csswg.org/css-transforms-2/#individual-transforms",
     servo_restyle_damage = "reflow_out_of_flow",
@@ -378,7 +389,7 @@ ${helpers.predefined_type(
     "generics::transform::Translate::None",
     animation_value_type="ComputedValue",
     boxed=True,
-    flags="CREATES_STACKING_CONTEXT FIXPOS_CB",
+    flags="CREATES_STACKING_CONTEXT FIXPOS_CB CAN_ANIMATE_ON_COMPOSITOR",
     gecko_pref="layout.css.individual-transform.enabled",
     spec="https://drafts.csswg.org/css-transforms-2/#individual-transforms",
     servo_restyle_damage="reflow_out_of_flow",
@@ -406,18 +417,24 @@ ${helpers.single_keyword(
     animation_value_type="discrete",
 )}
 
-% for axis in ["x", "y"]:
-    ${helpers.predefined_type(
-        "scroll-snap-type-" + axis,
-        "ScrollSnapType",
-        "computed::ScrollSnapType::None",
-        products="gecko",
-        needs_context=False,
-        gecko_pref="layout.css.scroll-snap.enabled",
-        spec="Nonstandard (https://developer.mozilla.org/en-US/docs/Web/CSS/scroll-snap-type-x)",
-        animation_value_type="discrete",
-    )}
-% endfor
+${helpers.predefined_type(
+    "scroll-snap-align",
+    "ScrollSnapAlign",
+    "computed::ScrollSnapAlign::none()",
+    products="gecko",
+    gecko_pref="layout.css.scroll-snap-v1.enabled",
+    spec="https://drafts.csswg.org/css-scroll-snap-1/#scroll-snap-align",
+    animation_value_type="discrete",
+)}
+
+${helpers.predefined_type(
+    "scroll-snap-type",
+    "ScrollSnapType",
+    "computed::ScrollSnapType::none()",
+    products="gecko",
+    spec="https://drafts.csswg.org/css-scroll-snap-1/#scroll-snap-type",
+    animation_value_type="discrete",
+)}
 
 % for axis in ["x", "y"]:
     ${helpers.predefined_type(
@@ -591,6 +608,8 @@ ${helpers.predefined_type(
     products="gecko",
     animation_value_type="none",
     gecko_ffi_name="mBinding",
+    gecko_pref="layout.css.moz-binding.content.enabled",
+    enabled_in="chrome",
     spec="Nonstandard (https://developer.mozilla.org/en-US/docs/Web/CSS/-moz-binding)",
 )}
 
@@ -650,4 +669,17 @@ ${helpers.predefined_type(
     gecko_pref="layout.css.touch_action.enabled",
     animation_value_type="discrete",
     spec="https://compat.spec.whatwg.org/#touch-action",
+)}
+
+// Note that we only implement -webkit-line-clamp as a single, longhand
+// property for now, but the spec defines line-clamp as a shorthand for separate
+// max-lines, block-ellipsis, and continue properties.
+${helpers.predefined_type(
+    "-webkit-line-clamp",
+    "PositiveIntegerOrNone",
+    "Either::Second(None_)",
+    gecko_pref="layout.css.webkit-line-clamp.enabled",
+    animation_value_type="Integer",
+    products="gecko",
+    spec="https://drafts.csswg.org/css-overflow-3/#line-clamp",
 )}

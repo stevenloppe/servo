@@ -31,7 +31,7 @@ use js::jsapi::HandleValueArray;
 use js::jsapi::Heap;
 use js::jsapi::IsCallable;
 use js::jsapi::IsConstructor;
-use js::jsapi::JSAutoCompartment;
+use js::jsapi::JSAutoRealm;
 use js::jsapi::JSObject;
 use js::jsapi::JS_ClearPendingException;
 use js::jsapi::JS_IsExceptionPending;
@@ -50,7 +50,7 @@ use profile_traits::ipc;
 use script_traits::Painter;
 use script_traits::{DrawAPaintImageResult, PaintWorkletError};
 use servo_atoms::Atom;
-use servo_config::prefs::PREFS;
+use servo_config::pref;
 use servo_url::ServoUrl;
 use std::cell::Cell;
 use std::collections::hash_map::Entry;
@@ -76,6 +76,7 @@ pub struct PaintWorkletGlobalScope {
     /// <https://drafts.css-houdini.org/css-paint-api/#paint-definitions>
     paint_definitions: DomRefCell<HashMap<Atom, Box<PaintDefinition>>>,
     /// <https://drafts.css-houdini.org/css-paint-api/#paint-class-instances>
+    #[ignore_malloc_size_of = "mozjs"]
     paint_class_instances: DomRefCell<HashMap<Atom, Box<Heap<JSVal>>>>,
     /// The most recent name the worklet was called with
     cached_name: DomRefCell<Atom>,
@@ -251,7 +252,7 @@ impl PaintWorkletGlobalScope {
         );
 
         let cx = self.worklet_global.get_cx();
-        let _ac = JSAutoCompartment::new(cx, self.worklet_global.reflector().get_jsobject().get());
+        let _ac = JSAutoRealm::new(cx, self.worklet_global.reflector().get_jsobject().get());
 
         // TODO: Steps 1-2.1.
         // Step 2.2-5.1.
@@ -439,10 +440,7 @@ impl PaintWorkletGlobalScope {
                     .expect("Locking a painter.")
                     .schedule_a_worklet_task(WorkletTask::Paint(task));
 
-                let timeout = PREFS
-                    .get("dom.worklet.timeout_ms")
-                    .as_u64()
-                    .unwrap_or(10u64);
+                let timeout = pref!(dom.worklet.timeout_ms) as u64;
 
                 receiver
                     .recv_timeout(Duration::from_millis(timeout))
@@ -476,7 +474,9 @@ pub enum PaintWorkletTask {
 #[derive(JSTraceable, MallocSizeOf)]
 #[must_root]
 struct PaintDefinition {
+    #[ignore_malloc_size_of = "mozjs"]
     class_constructor: Heap<JSVal>,
+    #[ignore_malloc_size_of = "mozjs"]
     paint_function: Heap<JSVal>,
     constructor_valid_flag: Cell<bool>,
     context_alpha_flag: bool,

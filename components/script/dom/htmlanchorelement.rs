@@ -27,6 +27,7 @@ use crate::dom::urlhelper::UrlHelper;
 use crate::dom::virtualmethods::VirtualMethods;
 use dom_struct::dom_struct;
 use html5ever::{LocalName, Prefix};
+use net_traits::request::Referrer;
 use num_traits::ToPrimitive;
 use servo_url::ServoUrl;
 use std::default::Default;
@@ -599,7 +600,14 @@ pub fn follow_hyperlink(subject: &Element, hyperlink_suffix: Option<String>) {
         let values = link_types.Value();
         let contains_noopener = values.contains("noopener");
         let contains_noreferrer = values.contains("noreferrer");
-        contains_noreferrer || contains_noopener
+        let contains_opener = values.contains("opener");
+        let target_is_blank = if let Some(name) = target_attribute_value.as_ref() {
+            name.Value().to_lowercase() == "_blank"
+        } else {
+            false
+        };
+
+        contains_noreferrer || contains_noopener || (!contains_opener && target_is_blank)
     } else {
         false
     };
@@ -622,7 +630,7 @@ pub fn follow_hyperlink(subject: &Element, hyperlink_suffix: Option<String>) {
         // will have been done as part of Step 7 above
         // in choose_browsing_context/create_auxiliary_browsing_context.
 
-        // Step 10, 11, 12, 13. TODO: if parsing the URL failed, navigate to error page.
+        // Step 10, 11. TODO: if parsing the URL failed, navigate to error page.
         let attribute = subject.get_attribute(&ns!(), &local_name!("href")).unwrap();
         let mut href = attribute.Value();
         // Step 11: append a hyperlink suffix.
@@ -640,8 +648,16 @@ pub fn follow_hyperlink(subject: &Element, hyperlink_suffix: Option<String>) {
             .get_attribute_by_name(DOMString::from_string(String::from("referrerpolicy")))
             .and_then(|attribute: DomRoot<Attr>| (determine_policy_for_token(&attribute.Value())));
 
-        // Step 13, 14.
+        // Step 13
+        let referrer = match subject.get_attribute(&ns!(), &local_name!("rel")) {
+            Some(ref link_types) if link_types.Value().contains("noreferrer") => {
+                Referrer::NoReferrer
+            },
+            _ => Referrer::Client,
+        };
+
+        // Step 14
         debug!("following hyperlink to {}", url);
-        target_window.load_url(url, replace, false, referrer_policy);
+        target_window.load_url(url, replace, false, referrer, referrer_policy);
     };
 }

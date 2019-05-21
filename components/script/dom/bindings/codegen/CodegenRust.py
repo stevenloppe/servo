@@ -458,7 +458,7 @@ class CGMethodCall(CGThing):
             pickFirstSignature("%s.get().is_object() && "
                                "{ rooted!(in(cx) let obj = %s.get().to_object()); "
                                "let mut is_date = false; "
-                               "assert!(JS_ObjectIsDate(cx, obj.handle(), &mut is_date)); "
+                               "assert!(ObjectIsDate(cx, obj.handle(), &mut is_date)); "
                                "is_date }" %
                                (distinguishingArg, distinguishingArg),
                                lambda s: (s[1][distinguishingIndex].type.isDate() or
@@ -573,9 +573,6 @@ def getJSToNativeConversionInfo(type, descriptorProvider, failureCode=None,
                                 isAutoRooted=False,
                                 invalidEnumValueFatal=True,
                                 defaultValue=None,
-                                treatNullAs="Default",
-                                isEnforceRange=False,
-                                isClamp=False,
                                 exceptionCode=None,
                                 allowTreatNonObjectAsNull=False,
                                 isCallbackReturnValue=False,
@@ -603,12 +600,6 @@ def getJSToNativeConversionInfo(type, descriptorProvider, failureCode=None,
 
     If defaultValue is not None, it's the IDL default value for this conversion
 
-    If isEnforceRange is true, we're converting an integer and throwing if the
-    value is out of range.
-
-    If isClamp is true, we're converting an integer and clamping if the
-    value is out of range.
-
     If allowTreatNonObjectAsNull is true, then [TreatNonObjectAsNull]
     extended attributes on nullable callback functions will be honored.
 
@@ -630,6 +621,13 @@ def getJSToNativeConversionInfo(type, descriptorProvider, failureCode=None,
     """
     # We should not have a defaultValue if we know we're an object
     assert not isDefinitelyObject or defaultValue is None
+
+    isEnforceRange = type.enforceRange
+    isClamp = type.clamp
+    if type.treatNullAsEmpty:
+        treatNullAs = "EmptyString"
+    else:
+        treatNullAs = "Default"
 
     # If exceptionCode is not set, we'll just rethrow the exception we got.
     # Note that we can't just set failureCode to exceptionCode, because setting
@@ -749,7 +747,15 @@ def getJSToNativeConversionInfo(type, descriptorProvider, failureCode=None,
             for memberType in type.unroll().flatMemberTypes
             if memberType.isDictionary()
         ]
-        if dictionaries:
+        if defaultValue and not isinstance(defaultValue, IDLNullValue):
+            tag = defaultValue.type.tag()
+            if tag is IDLType.Tags.bool:
+                default = "%s::Boolean(%s)" % (
+                    union_native_type(type),
+                    "true" if defaultValue.value else "false")
+            else:
+                raise("We don't currently support default values that aren't null or boolean")
+        elif dictionaries:
             if defaultValue:
                 assert isinstance(defaultValue, IDLNullValue)
                 dictionary, = dictionaries
@@ -789,7 +795,7 @@ def getJSToNativeConversionInfo(type, descriptorProvider, failureCode=None,
         #    our own implementation code.
         templateBody = fill(
             """
-            { // Scope for our JSAutoCompartment.
+            { // Scope for our JSAutoRealm.
 
                 rooted!(in(cx) let globalObj = CurrentGlobalOrNull(cx));
                 let promiseGlobal = GlobalScope::from_object_maybe_wrapped(globalObj.handle().get());
@@ -1301,9 +1307,6 @@ class CGArgumentConverter(CGThing):
             descriptorProvider,
             invalidEnumValueFatal=invalidEnumValueFatal,
             defaultValue=argument.defaultValue,
-            treatNullAs=argument.treatNullAs,
-            isEnforceRange=argument.enforceRange,
-            isClamp=argument.clamp,
             isMember="Variadic" if argument.variadic else False,
             isAutoRooted=type_needs_auto_root(argument.type),
             allowTreatNonObjectAsNull=argument.allowTreatNonCallableAsNull())
@@ -2384,6 +2387,7 @@ def UnionTypes(descriptors, dictionaries, callbacks, typedefs, config):
         'crate::dom::bindings::conversions::root_from_handlevalue',
         'std::ptr::NonNull',
         'crate::dom::bindings::mozmap::MozMap',
+        'crate::dom::bindings::num::Finite',
         'crate::dom::bindings::root::DomRoot',
         'crate::dom::bindings::str::ByteString',
         'crate::dom::bindings::str::DOMString',
@@ -2582,7 +2586,7 @@ class CGConstructorEnabled(CGAbstractMethod):
         pref = iface.getExtendedAttribute("Pref")
         if pref:
             assert isinstance(pref, list) and len(pref) == 1
-            conditions.append('PREFS.get("%s").as_boolean().unwrap_or(false)' % pref[0])
+            conditions.append('prefs::pref_map().get("%s").as_bool().unwrap_or(false)' % pref[0])
 
         func = iface.getExtendedAttribute("Func")
         if func:
@@ -2705,7 +2709,7 @@ assert!(!scope.get().is_null());
 assert!(((*get_object_class(scope.get())).flags & JSCLASS_IS_GLOBAL) != 0);
 
 rooted!(in(cx) let mut proto = ptr::null_mut::<JSObject>());
-let _ac = JSAutoCompartment::new(cx, scope.get());
+let _ac = JSAutoRealm::new(cx, scope.get());
 GetProtoObject(cx, scope, proto.handle_mut());
 assert!(!proto.is_null());
 
@@ -2760,7 +2764,7 @@ assert!(!obj.is_null());
 
 (*raw).init_reflector(obj.get());
 
-let _ac = JSAutoCompartment::new(cx, obj.get());
+let _ac = JSAutoRealm::new(cx, obj.get());
 rooted!(in(cx) let mut proto = ptr::null_mut::<JSObject>());
 GetProtoObject(cx, obj.handle(), proto.handle_mut());
 assert!(JS_SplicePrototype(cx, obj.handle(), proto.handle()));
@@ -2879,7 +2883,7 @@ class CGCreateInterfaceObjectsMethod(CGAbstractMethod):
         name = self.descriptor.interface.identifier.name
         if self.descriptor.interface.isNamespace():
             if self.descriptor.interface.getExtendedAttribute("ProtoObjectHack"):
-                proto = "JS_GetObjectPrototype(cx, global)"
+                proto = "GetRealmObjectPrototype(cx)"
             else:
                 proto = "JS_NewPlainObject(cx)"
             if self.properties.static_methods.length():
@@ -2915,11 +2919,12 @@ assert!((*cache)[PrototypeList::Constructor::%(id)s as usize].is_null());
         parentName = self.descriptor.getParentName()
         if not parentName:
             if self.descriptor.interface.getExtendedAttribute("ExceptionClass"):
-                getPrototypeProto = "prototype_proto.set(JS_GetErrorPrototype(cx))"
+                protoGetter = "GetRealmErrorPrototype"
             elif self.descriptor.interface.isIteratorInterface():
-                getPrototypeProto = "prototype_proto.set(JS_GetIteratorPrototype(cx))"
+                protoGetter = "GetRealmIteratorPrototype"
             else:
-                getPrototypeProto = "prototype_proto.set(JS_GetObjectPrototype(cx, global))"
+                protoGetter = "GetRealmObjectPrototype"
+            getPrototypeProto = "prototype_proto.set(%s(cx))" % protoGetter
         else:
             getPrototypeProto = ("%s::GetProtoObject(cx, global, prototype_proto.handle_mut())" %
                                  toBindingNamespace(parentName))
@@ -2977,14 +2982,13 @@ assert!((*cache)[PrototypeList::ID::%(id)s as usize].is_null());
             else:
                 properties["length"] = 0
             parentName = self.descriptor.getParentName()
+            code.append(CGGeneric("rooted!(in(cx) let mut interface_proto = ptr::null_mut::<JSObject>());"))
             if parentName:
                 parentName = toBindingNamespace(parentName)
                 code.append(CGGeneric("""
-rooted!(in(cx) let mut interface_proto = ptr::null_mut::<JSObject>());
 %s::GetConstructorObject(cx, global, interface_proto.handle_mut());""" % parentName))
             else:
-                code.append(CGGeneric("""
-rooted!(in(cx) let interface_proto = JS_GetFunctionPrototype(cx, global));"""))
+                code.append(CGGeneric("interface_proto.set(GetRealmFunctionPrototype(cx));"))
             code.append(CGGeneric("""\
 assert!(!interface_proto.is_null());
 
@@ -3508,9 +3512,6 @@ class FakeArgument():
         self.variadic = False
         self.defaultValue = None
         self._allowTreatNonObjectAsNull = allowTreatNonObjectAsNull
-        self.treatNullAs = interfaceMember.treatNullAs
-        self.enforceRange = False
-        self.clamp = False
 
     def allowTreatNonCallableAsNull(self):
         return self._allowTreatNonObjectAsNull
@@ -4874,7 +4875,7 @@ class CGProxySpecialOperation(CGPerSignatureCall):
             # arguments[0] is the index or name of the item that we're setting.
             argument = arguments[1]
             info = getJSToNativeConversionInfo(
-                argument.type, descriptor, treatNullAs=argument.treatNullAs,
+                argument.type, descriptor,
                 exceptionCode="return false;")
             template = info.template
             declType = info.declType
@@ -5543,7 +5544,7 @@ if args.callee() == new_target.get() {
 rooted!(in(cx) let mut prototype = ptr::null_mut::<JSObject>());
 {
     rooted!(in(cx) let mut proto_val = UndefinedValue());
-    let _ac = JSAutoCompartment::new(cx, new_target.get());
+    let _ac = JSAutoRealm::new(cx, new_target.get());
     if !JS_GetProperty(cx, new_target.handle(), b"prototype\\0".as_ptr() as *const _, proto_val.handle_mut()) {
         return false;
     }
@@ -5764,7 +5765,7 @@ def generate_imports(config, cgthings, descriptors, callbacks=None, dictionaries
         'js::jsapi::Heap',
         'js::jsapi::INTERNED_STRING_TO_JSID',
         'js::jsapi::IsCallable',
-        'js::jsapi::JSAutoCompartment',
+        'js::jsapi::JSAutoRealm',
         'js::jsapi::JSCLASS_FOREGROUND_FINALIZE',
         'js::jsapi::JSCLASS_RESERVED_SLOTS_SHIFT',
         'js::jsapi::JSClass',
@@ -5803,11 +5804,10 @@ def generate_imports(config, cgthings, descriptors, callbacks=None, dictionaries
         'js::rust::wrappers::JS_DefineProperty',
         'js::rust::wrappers::JS_DefinePropertyById2',
         'js::jsapi::JS_ForwardGetPropertyTo',
-        'js::jsapi::JS_GetErrorPrototype',
-        'js::rust::wrappers::JS_GetFunctionPrototype',
-        'js::jsapi::JS_GetGlobalForObject',
-        'js::jsapi::JS_GetIteratorPrototype',
-        'js::rust::wrappers::JS_GetObjectPrototype',
+        'js::jsapi::GetRealmErrorPrototype',
+        'js::jsapi::GetRealmFunctionPrototype',
+        'js::jsapi::GetRealmIteratorPrototype',
+        'js::jsapi::GetRealmObjectPrototype',
         'js::rust::wrappers::JS_GetProperty',
         'js::jsapi::JS_GetPropertyById',
         'js::jsapi::JS_GetPropertyDescriptorById',
@@ -5818,7 +5818,7 @@ def generate_imports(config, cgthings, descriptors, callbacks=None, dictionaries
         'js::jsapi::JS_NewObject',
         'js::rust::wrappers::JS_NewObjectWithGivenProto',
         'js::rust::wrappers::JS_NewObjectWithoutMetadata',
-        'js::rust::wrappers::JS_ObjectIsDate',
+        'js::rust::wrappers::ObjectIsDate',
         'js::rust::wrappers::JS_SetImmutablePrototype',
         'js::rust::wrappers::JS_SetProperty',
         'js::rust::wrappers::JS_SetPrototype',
@@ -5898,7 +5898,7 @@ def generate_imports(config, cgthings, descriptors, callbacks=None, dictionaries
         'crate::dom::bindings::root::Dom',
         'crate::dom::bindings::root::DomRoot',
         'crate::dom::bindings::root::OptionalHeapSetter',
-        'crate::dom::bindings::root::RootedReference',
+        'crate::dom::bindings::root::DomSlice',
         'crate::dom::bindings::utils::AsVoidPtr',
         'crate::dom::bindings::utils::DOMClass',
         'crate::dom::bindings::utils::DOMJSClass',
@@ -5976,7 +5976,8 @@ def generate_imports(config, cgthings, descriptors, callbacks=None, dictionaries
         'crate::dom::globalscope::GlobalScope',
         'crate::mem::malloc_size_of_including_raw_self',
         'libc',
-        'servo_config::prefs::PREFS',
+        'servo_config::pref',
+        'servo_config::prefs',
         'std::borrow::ToOwned',
         'std::cmp',
         'std::mem',
@@ -6399,13 +6400,10 @@ class CGDictionary(CGThing):
         conversion = (
             "{\n"
             "    rooted!(in(cx) let mut rval = UndefinedValue());\n"
-            "    match r#try!(get_dictionary_property(cx, object.handle(), \"%s\", rval.handle_mut())) {\n"
-            "        true => {\n"
+            "    if r#try!(get_dictionary_property(cx, object.handle(), \"%s\", rval.handle_mut())) {\n"
             "%s\n"
-            "        },\n"
-            "        false => {\n"
+            "    } else {\n"
             "%s\n"
-            "        },\n"
             "    }\n"
             "}") % (member.identifier.name, indent(conversion), indent(default))
 
@@ -6889,7 +6887,7 @@ class CGCallbackInterface(CGCallback):
 
 class FakeMember():
     def __init__(self):
-        self.treatNullAs = "Default"
+        pass
 
     def isStatic(self):
         return False
@@ -7252,8 +7250,12 @@ def camel_to_upper_snake(s):
 
 def process_arg(expr, arg):
     if arg.type.isGeckoInterface() and not arg.type.unroll().inner.isCallback():
-        if arg.type.nullable() or arg.type.isSequence() or arg.optional:
+        if arg.variadic or arg.type.isSequence():
             expr += ".r()"
+        elif arg.type.nullable() and arg.optional and not arg.defaultValue:
+            expr += ".as_ref().map(Option::deref)"
+        elif arg.type.nullable() or arg.optional and not arg.defaultValue:
+            expr += ".deref()"
         else:
             expr = "&" + expr
     elif isinstance(arg.type, IDLPromiseType):

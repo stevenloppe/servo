@@ -41,7 +41,7 @@ class Config:
         self.index_read_only = False
         self.scopes_for_all_subtasks = []
         self.routes_for_all_subtasks = []
-        self.docker_image_buil_worker_type = None
+        self.docker_image_build_worker_type = None
         self.docker_images_expire_in = "1 month"
         self.repacked_msi_files_expire_in = "1 month"
         self.treeherder_repository_name = None
@@ -286,6 +286,7 @@ class GenericWorkerTask(Task):
         super().__init__(*args, **kwargs)
         self.max_run_time_minutes = 30
         self.env = {}
+        self.features = {}
         self.mounts = []
         self.artifacts = []
 
@@ -314,6 +315,7 @@ class GenericWorkerTask(Task):
             worker_payload,
             env=self.env,
             mounts=self.mounts,
+            features=self.features,
             artifacts=[
                 {
                     "type": type_,
@@ -335,6 +337,15 @@ class GenericWorkerTask(Task):
         Paths are relative to the task’s home directory.
         """
         self.artifacts.extend((type, path) for path in paths)
+        return self
+
+    def with_features(self, *names):
+        """
+        Enable the given `generic-worker` features.
+
+        <https://github.com/taskcluster/generic-worker/blob/master/native_windows.yml>
+        """
+        self.features.update({name: True for name in names})
         return self
 
     def _mount_content(self, url_or_artifact_name, task_id, sha256):
@@ -431,14 +442,15 @@ class WindowsGenericWorkerTask(GenericWorkerTask):
             cd repo
         """
         if sparse_checkout:
+            self.with_mounts({
+                "file": "sparse-checkout",
+                "content": {"raw": "\n".join(sparse_checkout)},
+            })
             git += """
                 git config core.sparsecheckout true
-                echo %SPARSE_CHECKOUT_BASE64% > .git\\info\\sparse.b64
-                certutil -decode .git\\info\\sparse.b64 .git\\info\\sparse-checkout
+                copy ..\\sparse-checkout .git\\info\\sparse-checkout
                 type .git\\info\\sparse-checkout
             """
-            self.env["SPARSE_CHECKOUT_BASE64"] = base64.b64encode(
-                "\n".join(sparse_checkout).encode("utf-8"))
         git += """
             git fetch --depth 1 %GIT_URL% %GIT_REF%
             git reset --hard %GIT_SHA%
@@ -475,8 +487,8 @@ class WindowsGenericWorkerTask(GenericWorkerTask):
         ) \
         .with_file_mount(
             "https://static.rust-lang.org/rustup/archive/" +
-                "1.13.0/i686-pc-windows-gnu/rustup-init.exe",
-            sha256="43072fbe6b38ab38cd872fa51a33ebd781f83a2d5e83013857fab31fc06e4bf0",
+                "1.17.0/x86_64-pc-windows-msvc/rustup-init.exe",
+            sha256="002127adeaaee6ef8d82711b5c2881a1db873262f63aea60cee9632f207e8f29",
         )
 
     def with_repacked_msi(self, url, sha256, path):
@@ -692,9 +704,9 @@ class DockerWorkerTask(UnixTaskMixin, Task):
 
     def with_features(self, *names):
         """
-        Enable the give `docker-worker` features.
+        Enable the given `docker-worker` features.
 
-        <https://docs.taskcluster.net/docs/reference/workers/docker-worker/docs/features>
+        <https://github.com/taskcluster/docker-worker/blob/master/docs/features.md>
         """
         self.features.update({name: True for name in names})
         return self
@@ -722,7 +734,7 @@ class DockerWorkerTask(UnixTaskMixin, Task):
 
         image_build_task = (
             DockerWorkerTask("Docker image: " + image_name)
-            .with_worker_type(CONFIG.docker_image_buil_worker_type or self.worker_type)
+            .with_worker_type(CONFIG.docker_image_build_worker_type or self.worker_type)
             .with_max_run_time_minutes(30)
             .with_index_and_artifacts_expire_in(CONFIG.docker_images_expire_in)
             .with_features("dind")

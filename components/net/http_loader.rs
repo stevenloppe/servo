@@ -41,8 +41,8 @@ use net_traits::request::{CacheMode, CredentialsMode, Destination, Origin};
 use net_traits::request::{RedirectMode, Referrer, Request, RequestMode};
 use net_traits::request::{ResponseTainting, ServiceWorkersMode};
 use net_traits::response::{HttpsState, Response, ResponseBody, ResponseType};
-use net_traits::ResourceAttribute;
 use net_traits::{CookieSource, FetchMetadata, NetworkError, ReferrerPolicy};
+use net_traits::{RedirectStartValue, ResourceAttribute, ResourceFetchTiming};
 use openssl::ssl::SslConnectorBuilder;
 use servo_url::{ImmutableOrigin, ServoUrl};
 use std::collections::{HashMap, HashSet};
@@ -51,8 +51,7 @@ use std::iter::FromIterator;
 use std::mem;
 use std::ops::Deref;
 use std::str::FromStr;
-use std::sync::Mutex;
-use std::sync::RwLock;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime};
 use time::{self, Tm};
 use tokio::prelude::{future, Future, Stream};
@@ -349,6 +348,7 @@ fn obtain_response(
     iters: u32,
     request_id: Option<&str>,
     is_xhr: bool,
+    context: &FetchContext,
 ) -> Box<
     dyn Future<
         Item = (HyperResponse<Decoder>, Option<ChromeToDevtoolsControlMsg>),
@@ -381,6 +381,12 @@ fn obtain_response(
     // TODO(#21261) connect_start: set if a persistent connection is *not* used and the last non-redirected
     // fetch passes the timing allow check
     let connect_start = precise_time_ms();
+    context
+        .timing
+        .lock()
+        .unwrap()
+        .set_attribute(ResourceAttribute::ConnectStart(connect_start));
+
     // https://url.spec.whatwg.org/#percent-encoded-bytes
     let request = HyperRequest::builder()
         .method(method)
@@ -400,8 +406,12 @@ fn obtain_response(
     };
     *request.headers_mut() = headers.clone();
 
-    //TODO(#21262) connect_end
     let connect_end = precise_time_ms();
+    context
+        .timing
+        .lock()
+        .unwrap()
+        .set_attribute(ResourceAttribute::ConnectEnd(connect_end));
 
     let request_id = request_id.map(|v| v.to_owned());
     let pipeline_id = pipeline_id.clone();
@@ -447,7 +457,6 @@ fn obtain_response(
             })
             .map_err(move |e| NetworkError::from_hyper_error(&e)),
     )
-    // TODO(#21263) response_end (also needs to be set above if fetch is aborted due to an error)
 }
 
 /// [HTTP fetch](https://fetch.spec.whatwg.org#http-fetch)
@@ -528,7 +537,6 @@ pub fn http_fetch(
         // Generally, we use a persistent connection, so we will also set other PerformanceResourceTiming
         //   attributes to this as well (domain_lookup_start, domain_lookup_end, connect_start, connect_end,
         //   secure_connection_start)
-        // TODO(#21256) maybe set redirect_start if this resource initiates the redirect
         // TODO(#21254) also set startTime equal to either fetch_start or redirect_start
         //   (https://w3c.github.io/resource-timing/#dfn-starttime)
         context
@@ -619,8 +627,7 @@ pub fn http_fetch(
             request.redirect_count as u16,
         ));
 
-    let timing = &*context.timing.lock().unwrap();
-    response.resource_timing = timing.clone();
+    response.resource_timing = context.timing.lock().unwrap().clone();
 
     // Step 6
     response
@@ -659,6 +666,15 @@ pub fn http_redirect_fetch(
     };
 
     // Step 1 of https://w3c.github.io/resource-timing/#dom-performanceresourcetiming-fetchstart
+    // TODO: check origin and timing allow check
+    context
+        .timing
+        .lock()
+        .unwrap()
+        .set_attribute(ResourceAttribute::RedirectStart(
+            RedirectStartValue::FetchStart,
+        ));
+
     context
         .timing
         .lock()
@@ -771,21 +787,27 @@ fn http_network_or_cache_fetch(
     done_chan: &mut DoneChannel,
     context: &FetchContext,
 ) -> Response {
+    // Step 2
+    let mut response: Option<Response> = None;
+
+    // Step 4
+    let mut revalidating_flag = false;
+
     // TODO: Implement Window enum for Request
     let request_has_no_window = true;
 
-    // Step 2
+    // Step 5.1
     let mut http_request;
     let http_request = if request_has_no_window && request.redirect_mode == RedirectMode::Error {
         request
     } else {
-        // Step 3
+        // Step 5.2
         // TODO Implement body source
         http_request = request.clone();
         &mut http_request
     };
 
-    // Step 4
+    // Step 5.3
     let credentials_flag = match http_request.credentials_mode {
         CredentialsMode::Include => true,
         CredentialsMode::CredentialsSameOrigin
@@ -798,26 +820,26 @@ fn http_network_or_cache_fetch(
 
     let content_length_value = match http_request.body {
         None => match http_request.method {
-            // Step 6
+            // Step 5.5
             Method::POST | Method::PUT => Some(0),
-            // Step 5
+            // Step 5.4
             _ => None,
         },
-        // Step 7
+        // Step 5.6
         Some(ref http_request_body) => Some(http_request_body.len() as u64),
     };
 
-    // Step 8
+    // Step 5.7
     if let Some(content_length_value) = content_length_value {
         http_request
             .headers
             .typed_insert(ContentLength(content_length_value));
         if http_request.keep_alive {
-            // Step 9 TODO: needs request's client object
+            // Step 5.8 TODO: needs request's client object
         }
     }
 
-    // Step 10
+    // Step 5.9
     match http_request.referrer {
         Referrer::NoReferrer => (),
         Referrer::ReferrerUrl(ref http_request_referrer) => http_request
@@ -831,7 +853,7 @@ fn http_network_or_cache_fetch(
         },
     };
 
-    // Step 11
+    // Step 5.10
     if cors_flag || (http_request.method != Method::GET && http_request.method != Method::HEAD) {
         debug_assert_ne!(http_request.origin, Origin::Client);
         if let Origin::Origin(ref url_origin) = http_request.origin {
@@ -841,7 +863,7 @@ fn http_network_or_cache_fetch(
         }
     }
 
-    // Step 12
+    // Step 5.11
     if !http_request.headers.contains_key(header::USER_AGENT) {
         let user_agent = context.user_agent.clone().into_owned();
         http_request
@@ -850,19 +872,19 @@ fn http_network_or_cache_fetch(
     }
 
     match http_request.cache_mode {
-        // Step 13
+        // Step 5.12
         CacheMode::Default if is_no_store_cache(&http_request.headers) => {
             http_request.cache_mode = CacheMode::NoStore;
         },
 
-        // Step 14
+        // Step 5.13
         CacheMode::NoCache if !http_request.headers.contains_key(header::CACHE_CONTROL) => {
             http_request
                 .headers
                 .typed_insert(CacheControl::new().with_max_age(Duration::from_secs(0)));
         },
 
-        // Step 15
+        // Step 5.14
         CacheMode::Reload | CacheMode::NoStore => {
             // Substep 1
             if !http_request.headers.contains_key(header::PRAGMA) {
@@ -880,7 +902,10 @@ fn http_network_or_cache_fetch(
         _ => {},
     }
 
-    // Step 16
+    // Step 5.15
+    // TODO: if necessary append `Accept-Encoding`/`identity` to headers
+
+    // Step 5.16
     let current_url = http_request.current_url();
     let host = Host::from(
         format!(
@@ -900,7 +925,7 @@ fn http_network_or_cache_fetch(
     // here, according to the fetch spec
     set_default_accept_encoding(&mut http_request.headers);
 
-    // Step 17
+    // Step 5.17
     // TODO some of this step can't be implemented yet
     if credentials_flag {
         // Substep 1
@@ -940,16 +965,10 @@ fn http_network_or_cache_fetch(
         }
     }
 
-    // Step 18
+    // Step 5.18
     // TODO If there’s a proxy-authentication entry, use it as appropriate.
 
-    // Step 19
-    let mut response: Option<Response> = None;
-
-    // Step 20
-    let mut revalidating_flag = false;
-
-    // Step 21
+    // Step 5.19
     if let Ok(http_cache) = context.state.http_cache.read() {
         if let Some(response_from_cache) = http_cache.construct_response(&http_request, done_chan) {
             let response_headers = response_from_cache.response.headers.clone();
@@ -1017,7 +1036,10 @@ fn http_network_or_cache_fetch(
 
     wait_for_cached_response(done_chan, &mut response);
 
-    // Step 22
+    // Step 6
+    // TODO: https://infra.spec.whatwg.org/#if-aborted
+
+    // Step 7
     if response.is_none() {
         // Substep 1
         if http_request.cache_mode == CacheMode::OnlyIfCached {
@@ -1026,7 +1048,7 @@ fn http_network_or_cache_fetch(
             ));
         }
     }
-    // More Step 22
+    // More Step 7
     if response.is_none() {
         // Substep 2
         let forward_response =
@@ -1067,7 +1089,13 @@ fn http_network_or_cache_fetch(
 
     let mut response = response.unwrap();
 
-    // Step 23
+    // Step 8
+    // TODO: if necessary set response's range-requested flag
+
+    // Step 9
+    // TODO: handle CORS not set and cross-origin blocked
+
+    // Step 10
     // FIXME: Figure out what to do with request window objects
     if let (Some((StatusCode::UNAUTHORIZED, _)), false, true) =
         (response.status.as_ref(), cors_flag, credentials_flag)
@@ -1100,7 +1128,7 @@ fn http_network_or_cache_fetch(
         );
     }
 
-    // Step 24
+    // Step 11
     if let Some((StatusCode::PROXY_AUTHENTICATION_REQUIRED, _)) = response.status.as_ref() {
         // Step 1
         if request_has_no_window {
@@ -1125,13 +1153,34 @@ fn http_network_or_cache_fetch(
         //                                    cors_flag, done_chan, context);
     }
 
-    // Step 25
+    // Step 12
     if authentication_fetch_flag {
         // TODO Create the authentication entry for request and the given realm
     }
 
-    // Step 26
+    // Step 13
     response
+}
+
+// Convenience struct that implements Done, for setting responseEnd on function return
+struct ResponseEndTimer(Option<Arc<Mutex<ResourceFetchTiming>>>);
+
+impl ResponseEndTimer {
+    fn neuter(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for ResponseEndTimer {
+    fn drop(&mut self) {
+        let ResponseEndTimer(resource_fetch_timing_opt) = self;
+
+        resource_fetch_timing_opt.as_ref().map_or((), |t| {
+            t.lock()
+                .unwrap()
+                .set_attribute(ResourceAttribute::ResponseEnd);
+        })
+    }
 }
 
 /// [HTTP network fetch](https://fetch.spec.whatwg.org/#http-network-fetch)
@@ -1141,6 +1190,7 @@ fn http_network_fetch(
     done_chan: &mut DoneChannel,
     context: &FetchContext,
 ) -> Response {
+    let mut response_end_timer = ResponseEndTimer(Some(context.timing.clone()));
     // Step 1
     // nothing to do here, since credentials_flag is already a boolean
 
@@ -1183,6 +1233,7 @@ fn http_network_fetch(
         request.redirect_count + 1,
         request_id.as_ref().map(Deref::deref),
         is_xhr,
+        context,
     );
 
     let pipeline_id = request.pipeline_id;
@@ -1199,8 +1250,8 @@ fn http_network_fetch(
         }
     }
 
-    let timing = &*context.timing.lock().unwrap();
-    let mut response = Response::new(url.clone(), timing.clone());
+    let timing = context.timing.lock().unwrap().clone();
+    let mut response = Response::new(url.clone(), timing);
     response.status = Some((
         res.status(),
         res.status().canonical_reason().unwrap_or("").into(),
@@ -1257,6 +1308,8 @@ fn http_network_fetch(
 
     let done_sender2 = done_sender.clone();
     let done_sender3 = done_sender.clone();
+    let timing_ptr2 = context.timing.clone();
+    let timing_ptr3 = context.timing.clone();
     HANDLE.lock().unwrap().spawn(
         res.into_body()
             .map_err(|_| ())
@@ -1280,6 +1333,10 @@ fn http_network_fetch(
                     _ => vec![],
                 };
                 *body = ResponseBody::Done(completed_body);
+                timing_ptr2
+                    .lock()
+                    .unwrap()
+                    .set_attribute(ResourceAttribute::ResponseEnd);
                 let _ = done_sender2.send(Data::Done);
                 future::ok(())
             })
@@ -1290,6 +1347,10 @@ fn http_network_fetch(
                     _ => vec![],
                 };
                 *body = ResponseBody::Done(completed_body);
+                timing_ptr3
+                    .lock()
+                    .unwrap()
+                    .set_attribute(ResourceAttribute::ResponseEnd);
                 let _ = done_sender3.send(Data::Done);
             }),
     );
@@ -1345,6 +1406,10 @@ fn http_network_fetch(
     // Substep 3
 
     // Step 16
+
+    // Ensure we don't override "responseEnd" on successful return of this function
+    response_end_timer.neuter();
+
     response
 }
 

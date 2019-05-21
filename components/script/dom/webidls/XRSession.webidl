@@ -17,18 +17,20 @@ interface XRSession : EventTarget {
   // // Attributes
   readonly attribute XRSessionMode mode;
   // readonly attribute XRPresentationContext outputContext;
-  // readonly attribute XREnvironmentBlendMode environmentBlendMode;
+  readonly attribute XREnvironmentBlendMode environmentBlendMode;
 
-  attribute double depthNear;
-  attribute double depthFar;
-  attribute XRLayer? baseLayer;
+  readonly attribute XRRenderState renderState;
+  [SameObject] readonly attribute XRSpace viewerSpace;
 
   // // Methods
-  // Promise<XRReferenceSpace> requestReferenceSpace(XRReferenceSpaceType type,
-  //        optional XRReferenceSpaceOptions options);
+  Promise<XRReferenceSpace> requestReferenceSpace(XRReferenceSpaceOptions options);
 
+  // workaround until we have FrozenArray
+  // see https://github.com/servo/servo/issues/10427#issuecomment-449593626
   // FrozenArray<XRInputSource> getInputSources();
+  sequence<XRInputSource> getInputSources();
 
+  Promise<void> updateRenderState(optional XRRenderStateInit state);
   long requestAnimationFrame(XRFrameRequestCallback callback);
   void cancelAnimationFrame(long handle);
 
@@ -42,4 +44,16 @@ interface XRSession : EventTarget {
   // attribute EventHandler oninputsourceschange;
   // attribute EventHandler onselectstart;
   // attribute EventHandler onselectend;
+};
+
+enum XRReferenceSpaceType {
+  "identity",
+  "stationary",
+  "bounded",
+  "unbounded"
+};
+
+dictionary XRReferenceSpaceOptions {
+  required XRReferenceSpaceType type;
+  XRStationaryReferenceSpaceSubtype subtype;
 };

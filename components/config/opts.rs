@@ -5,13 +5,12 @@
 //! Configuration options for a single run of the servo application. Created
 //! from command line arguments.
 
-use crate::prefs::{self, PrefValue, PREFS};
+use crate::prefs::{self, PrefValue};
 use euclid::TypedSize2D;
 use getopts::Options;
 use servo_geometry::DeviceIndependentPixel;
 use servo_url::ServoUrl;
 use std::borrow::Cow;
-use std::cmp;
 use std::default::Default;
 use std::env;
 use std::fs::{self, File};
@@ -77,6 +76,10 @@ pub struct Opts {
     pub load_webfonts_synchronously: bool,
 
     pub headless: bool,
+
+    /// Use ANGLE to create the GL context (Windows-only).
+    pub angle: bool,
+
     pub hard_fail: bool,
 
     /// True if we should bubble intrinsic widths sequentially (`-b`). If this is true, then
@@ -559,6 +562,7 @@ pub fn default_opts() -> Opts {
         gc_profile: false,
         load_webfonts_synchronously: false,
         headless: false,
+        angle: false,
         hard_fail: true,
         bubble_inline_sizes_separately: false,
         show_debug_fragment_borders: false,
@@ -667,6 +671,11 @@ pub fn from_cmdline_args(args: &[String]) -> ArgumentParsingResult {
         "",
     );
     opts.optflag("z", "headless", "Headless mode");
+    opts.optflag(
+        "",
+        "angle",
+        "Use ANGLE to create a GL context (Windows-only)",
+    );
     opts.optflag(
         "f",
         "hard-fail",
@@ -975,17 +984,11 @@ pub fn from_cmdline_args(args: &[String]) -> ArgumentParsingResult {
         })
         .collect();
 
-    let do_not_use_native_titlebar = opt_match.opt_present("b") ||
-        !PREFS
-            .get("shell.native-titlebar.enabled")
-            .as_boolean()
-            .unwrap();
+    let do_not_use_native_titlebar =
+        opt_match.opt_present("b") || !(pref!(shell.native_titlebar.enabled));
 
-    let enable_subpixel_text_antialiasing = !debug_options.disable_subpixel_aa &&
-        PREFS
-            .get("gfx.subpixel-text-antialiasing.enabled")
-            .as_boolean()
-            .unwrap();
+    let enable_subpixel_text_antialiasing =
+        !debug_options.disable_subpixel_aa && pref!(gfx.subpixel_text_antialiasing.enabled);
 
     let is_printing_version = opt_match.opt_present("v") || opt_match.opt_present("version");
 
@@ -1005,6 +1008,7 @@ pub fn from_cmdline_args(args: &[String]) -> ArgumentParsingResult {
         gc_profile: debug_options.gc_profile,
         load_webfonts_synchronously: debug_options.load_webfonts_synchronously,
         headless: opt_match.opt_present("z"),
+        angle: opt_match.opt_present("angle"),
         hard_fail: opt_match.opt_present("f") && !opt_match.opt_present("F"),
         bubble_inline_sizes_separately: bubble_inline_sizes_separately,
         profile_script_events: debug_options.profile_script_events,
@@ -1065,15 +1069,7 @@ pub fn from_cmdline_args(args: &[String]) -> ArgumentParsingResult {
     }
 
     if let Some(layout_threads) = layout_threads {
-        PREFS.set("layout.threads", PrefValue::Number(layout_threads as f64));
-    } else if let Some(layout_threads) = PREFS.get("layout.threads").as_string() {
-        PREFS.set(
-            "layout.threads",
-            PrefValue::Number(layout_threads.parse::<f64>().unwrap()),
-        );
-    } else if *PREFS.get("layout.threads") == PrefValue::Missing {
-        let layout_threads = cmp::max(num_cpus::get() * 3 / 4, 1);
-        PREFS.set("layout.threads", PrefValue::Number(layout_threads as f64));
+        set_pref!(layout.threads, layout_threads as i64);
     }
 
     ArgumentParsingResult::ChromeProcess
@@ -1104,15 +1100,26 @@ pub fn get() -> RwLockReadGuard<'static, Opts> {
 pub fn parse_pref_from_command_line(pref: &str) {
     let split: Vec<&str> = pref.splitn(2, '=').collect();
     let pref_name = split[0];
-    let value = split.get(1);
-    match value {
-        Some(&"false") => PREFS.set(pref_name, PrefValue::Boolean(false)),
-        Some(&"true") | None => PREFS.set(pref_name, PrefValue::Boolean(true)),
-        Some(value) => match value.parse::<f64>() {
-            Ok(v) => PREFS.set(pref_name, PrefValue::Number(v)),
-            Err(_) => PREFS.set(pref_name, PrefValue::String(value.to_string())),
+    let pref_value = parse_cli_pref_value(split.get(1).cloned());
+    prefs::pref_map()
+        .set(pref_name, pref_value)
+        .expect(format!("Error setting preference: {}", pref).as_str());
+}
+
+fn parse_cli_pref_value(input: Option<&str>) -> PrefValue {
+    match input {
+        Some("true") | None => PrefValue::Bool(true),
+        Some("false") => PrefValue::Bool(false),
+        Some(string) => {
+            if let Some(int) = string.parse::<i64>().ok() {
+                PrefValue::Int(int)
+            } else if let Some(float) = string.parse::<f64>().ok() {
+                PrefValue::Float(float)
+            } else {
+                PrefValue::from(string)
+            }
         },
-    };
+    }
 }
 
 pub fn parse_url_or_filename(cwd: &Path, input: &str) -> Result<ServoUrl, ()> {

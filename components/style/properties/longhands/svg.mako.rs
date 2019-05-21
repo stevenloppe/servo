@@ -87,7 +87,6 @@ ${helpers.predefined_type(
     "basic_shape::ClippingShape",
     "generics::basic_shape::ShapeSource::None",
     products="gecko",
-    boxed=True,
     animation_value_type="basic_shape::ClippingShape",
     flags="CREATES_STACKING_CONTEXT",
     spec="https://drafts.fxtf.org/css-masking/#propdef-clip-path",
@@ -96,6 +95,7 @@ ${helpers.predefined_type(
 ${helpers.single_keyword(
     "mask-mode",
     "match-source alpha luminance",
+    gecko_enum_prefix="StyleMaskMode",
     vector=True,
     products="gecko",
     animation_value_type="discrete",

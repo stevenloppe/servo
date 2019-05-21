@@ -8,7 +8,7 @@ use crate::dom::bindings::codegen::Bindings::UIEventBinding::UIEventMethods;
 use crate::dom::bindings::error::Fallible;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::reflect_dom_object;
-use crate::dom::bindings::root::{DomRoot, MutNullableDom, RootedReference};
+use crate::dom::bindings::root::{DomRoot, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::event::{Event, EventBubbles, EventCancelable};
 use crate::dom::eventtarget::EventTarget;
@@ -16,7 +16,7 @@ use crate::dom::uievent::UIEvent;
 use crate::dom::window::Window;
 use dom_struct::dom_struct;
 use euclid::Point2D;
-use servo_config::prefs::PREFS;
+use servo_config::pref;
 use std::cell::Cell;
 use std::default::Default;
 
@@ -32,6 +32,7 @@ pub struct MouseEvent {
     alt_key: Cell<bool>,
     meta_key: Cell<bool>,
     button: Cell<i16>,
+    buttons: Cell<u16>,
     related_target: MutNullableDom<EventTarget>,
     point_in_target: Cell<Option<Point2D<f32>>>,
 }
@@ -49,6 +50,7 @@ impl MouseEvent {
             alt_key: Cell::new(false),
             meta_key: Cell::new(false),
             button: Cell::new(0),
+            buttons: Cell::new(0),
             related_target: Default::default(),
             point_in_target: Cell::new(None),
         }
@@ -78,6 +80,7 @@ impl MouseEvent {
         shift_key: bool,
         meta_key: bool,
         button: i16,
+        buttons: u16,
         related_target: Option<&EventTarget>,
         point_in_target: Option<Point2D<f32>>,
     ) -> DomRoot<MouseEvent> {
@@ -99,6 +102,7 @@ impl MouseEvent {
             button,
             related_target,
         );
+        ev.buttons.set(buttons);
         ev.point_in_target.set(point_in_target);
         ev
     }
@@ -115,7 +119,7 @@ impl MouseEvent {
             type_,
             bubbles,
             cancelable,
-            init.parent.parent.view.r(),
+            init.parent.parent.view.deref(),
             init.parent.parent.detail,
             init.screenX,
             init.screenY,
@@ -126,7 +130,8 @@ impl MouseEvent {
             init.parent.shiftKey,
             init.parent.metaKey,
             init.button,
-            init.relatedTarget.r(),
+            0,
+            init.relatedTarget.deref(),
             None,
         );
         Ok(event)
@@ -183,6 +188,11 @@ impl MouseEventMethods for MouseEvent {
         self.button.get()
     }
 
+    // https://w3c.github.io/uievents/#dom-mouseevent-buttons
+    fn Buttons(&self) -> u16 {
+        self.buttons.get()
+    }
+
     // https://w3c.github.io/uievents/#widl-MouseEvent-relatedTarget
     fn GetRelatedTarget(&self) -> Option<DomRoot<EventTarget>> {
         self.related_target.get()
@@ -194,11 +204,7 @@ impl MouseEventMethods for MouseEvent {
     // This returns the same result as current gecko.
     // https://developer.mozilla.org/en-US/docs/Web/API/MouseEvent/which
     fn Which(&self) -> i32 {
-        if PREFS
-            .get("dom.mouseevent.which.enabled")
-            .as_boolean()
-            .unwrap_or(false)
-        {
+        if pref!(dom.mouse_event.which.enabled) {
             (self.button.get() + 1) as i32
         } else {
             0

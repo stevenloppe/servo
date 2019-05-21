@@ -4,10 +4,12 @@
 
 #![cfg_attr(feature = "unstable", feature(core_intrinsics))]
 #![cfg_attr(feature = "unstable", feature(on_unimplemented))]
+#![feature(borrow_state)]
 #![feature(const_fn)]
 #![feature(drain_filter)]
+#![feature(inner_deref)]
 #![feature(plugin)]
-#![feature(try_from)]
+#![feature(type_alias_enum_variants)]
 #![deny(unsafe_code)]
 #![allow(non_snake_case)]
 #![doc = "The script crate contains all matters DOM."]
@@ -55,6 +57,7 @@ mod devtools;
 pub mod document_loader;
 #[macro_use]
 mod dom;
+mod compartments;
 pub mod fetch;
 mod image_listener;
 mod layout_image;
@@ -67,6 +70,7 @@ pub mod script_thread;
 mod serviceworker_manager;
 mod serviceworkerjob;
 mod stylesheet_loader;
+mod stylesheet_set;
 mod task_manager;
 mod task_queue;
 mod task_source;
@@ -82,14 +86,17 @@ mod webdriver_handlers;
 ///
 /// TODO(emilio): A few of the FooHelpers can go away, presumably...
 pub mod layout_exports {
-    pub use crate::dom::bindings::inheritance::{CharacterDataTypeId, ElementTypeId};
-    pub use crate::dom::bindings::inheritance::{HTMLElementTypeId, NodeTypeId};
+    pub use crate::dom::bindings::inheritance::{
+        CharacterDataTypeId, DocumentFragmentTypeId, ElementTypeId,
+    };
+    pub use crate::dom::bindings::inheritance::{HTMLElementTypeId, NodeTypeId, TextTypeId};
     pub use crate::dom::bindings::root::LayoutDom;
     pub use crate::dom::characterdata::LayoutCharacterDataHelpers;
     pub use crate::dom::document::{Document, LayoutDocumentHelpers, PendingRestyle};
     pub use crate::dom::element::{Element, LayoutElementHelpers, RawLayoutElementHelpers};
     pub use crate::dom::node::NodeFlags;
     pub use crate::dom::node::{LayoutNodeHelpers, Node};
+    pub use crate::dom::shadowroot::{LayoutShadowRootHelpers, ShadowRoot};
     pub use crate::dom::text::Text;
 }
 

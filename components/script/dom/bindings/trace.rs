@@ -45,6 +45,7 @@ use canvas_traits::canvas::{
     CanvasGradientStop, CanvasId, LinearGradientStyle, RadialGradientStyle,
 };
 use canvas_traits::canvas::{CompositionOrBlending, LineCapStyle, LineJoinStyle, RepetitionStyle};
+use canvas_traits::webgl::GLLimits;
 use canvas_traits::webgl::{ActiveAttribInfo, ActiveUniformInfo, TexDataType, TexFormat};
 use canvas_traits::webgl::{WebGLBufferId, WebGLChan, WebGLContextShareMode, WebGLError};
 use canvas_traits::webgl::{WebGLFramebufferId, WebGLMsgSender, WebGLPipeline, WebGLProgramId};
@@ -55,7 +56,10 @@ use cssparser::RGBA;
 use devtools_traits::{CSSError, TimelineMarkerType, WorkerId};
 use encoding_rs::{Decoder, Encoding};
 use euclid::Length as EuclidLength;
-use euclid::{Point2D, Rect, Transform2D, Transform3D, TypedScale, TypedSize2D, Vector2D};
+use euclid::{
+    Point2D, Rect, RigidTransform3D, Rotation3D, Transform2D, Transform3D, TypedScale, TypedSize2D,
+    Vector2D,
+};
 use html5ever::buffer_queue::BufferQueue;
 use html5ever::{LocalName, Namespace, Prefix, QualName};
 use http::header::HeaderMap;
@@ -77,12 +81,11 @@ use msg::constellation_msg::{
 use net_traits::filemanager_thread::RelativePos;
 use net_traits::image::base::{Image, ImageMetadata};
 use net_traits::image_cache::{ImageCache, PendingImageId};
-use net_traits::request::{Request, RequestInit};
+use net_traits::request::{Request, RequestBuilder};
 use net_traits::response::HttpsState;
 use net_traits::response::{Response, ResponseBody};
 use net_traits::storage_thread::StorageType;
 use net_traits::{Metadata, NetworkError, ReferrerPolicy, ResourceFetchTiming, ResourceThreads};
-use offscreen_gl_context::GLLimits;
 use profile_traits::mem::ProfilerChan as MemProfilerChan;
 use profile_traits::time::ProfilerChan as TimeProfilerChan;
 use script_layout_interface::rpc::LayoutRPC;
@@ -101,7 +104,9 @@ use servo_media::audio::graph::NodeId;
 use servo_media::audio::panner_node::{DistanceModel, PanningModel};
 use servo_media::audio::param::ParamType;
 use servo_media::player::Player;
-use servo_media::Backend;
+use servo_media::streams::registry::MediaStreamId;
+use servo_media::streams::MediaStreamType;
+use servo_media::webrtc::WebRtcController;
 use servo_url::{ImmutableOrigin, MutableOrigin, ServoUrl};
 use smallvec::SmallVec;
 use std::cell::{Cell, RefCell, UnsafeCell};
@@ -114,6 +119,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 use style::attr::{AttrIdentifier, AttrValue, LengthOrPercentageOrAuto};
+use style::author_styles::AuthorStyles;
 use style::context::QuirksMode;
 use style::dom::OpaqueNode;
 use style::element_state::*;
@@ -121,10 +127,11 @@ use style::media_queries::MediaList;
 use style::properties::PropertyDeclarationBlock;
 use style::selector_parser::{PseudoElement, Snapshot};
 use style::shared_lock::{Locked as StyleLocked, SharedRwLock as StyleSharedRwLock};
-use style::stylesheet_set::DocumentStylesheetSet;
+use style::stylesheet_set::{AuthorStylesheetSet, DocumentStylesheetSet};
 use style::stylesheets::keyframes_rule::Keyframe;
 use style::stylesheets::{CssRules, FontFaceRule, KeyframesRule, MediaRule, Stylesheet};
 use style::stylesheets::{ImportRule, NamespaceRule, StyleRule, SupportsRule, ViewportRule};
+use style::stylist::CascadeData;
 use style::values::specified::Length;
 use tendril::fmt::UTF8;
 use tendril::stream::LossyDecoder;
@@ -132,7 +139,7 @@ use tendril::{StrTendril, TendrilSink};
 use time::{Duration, Timespec};
 use uuid::Uuid;
 use webrender_api::{DocumentId, ImageKey, RenderApiSender};
-use webvr_traits::WebVRGamepadHand;
+use webvr_traits::{WebVRGamepadData, WebVRGamepadHand, WebVRGamepadState};
 
 /// A trait to allow tracing (only) DOM objects.
 pub unsafe trait JSTraceable {
@@ -442,7 +449,7 @@ unsafe_no_jsmanaged_fields!(PendingRestyle);
 unsafe_no_jsmanaged_fields!(Stylesheet);
 unsafe_no_jsmanaged_fields!(HttpsState);
 unsafe_no_jsmanaged_fields!(Request);
-unsafe_no_jsmanaged_fields!(RequestInit);
+unsafe_no_jsmanaged_fields!(RequestBuilder);
 unsafe_no_jsmanaged_fields!(StyleSharedRwLock);
 unsafe_no_jsmanaged_fields!(USVString);
 unsafe_no_jsmanaged_fields!(ReferrerPolicy);
@@ -472,22 +479,28 @@ unsafe_no_jsmanaged_fields!(WebGLVertexArrayId);
 unsafe_no_jsmanaged_fields!(WebGLVersion);
 unsafe_no_jsmanaged_fields!(WebGLSLVersion);
 unsafe_no_jsmanaged_fields!(MediaList);
-unsafe_no_jsmanaged_fields!(WebVRGamepadHand);
+unsafe_no_jsmanaged_fields!(WebVRGamepadData, WebVRGamepadState, WebVRGamepadHand);
 unsafe_no_jsmanaged_fields!(ScriptToConstellationChan);
 unsafe_no_jsmanaged_fields!(InteractiveMetrics);
 unsafe_no_jsmanaged_fields!(InteractiveWindow);
 unsafe_no_jsmanaged_fields!(CanvasId);
 unsafe_no_jsmanaged_fields!(SourceSet);
 unsafe_no_jsmanaged_fields!(AudioBuffer);
-unsafe_no_jsmanaged_fields!(AudioContext<Backend>);
+unsafe_no_jsmanaged_fields!(AudioContext);
 unsafe_no_jsmanaged_fields!(NodeId);
 unsafe_no_jsmanaged_fields!(AnalysisEngine, DistanceModel, PanningModel, ParamType);
 unsafe_no_jsmanaged_fields!(dyn Player);
+unsafe_no_jsmanaged_fields!(WebRtcController);
+unsafe_no_jsmanaged_fields!(MediaStreamId, MediaStreamType);
 unsafe_no_jsmanaged_fields!(Mutex<MediaFrameRenderer>);
 unsafe_no_jsmanaged_fields!(RenderApiSender);
 unsafe_no_jsmanaged_fields!(ResourceFetchTiming);
 unsafe_no_jsmanaged_fields!(Timespec);
 unsafe_no_jsmanaged_fields!(HTMLMediaElementFetchContext);
+unsafe_no_jsmanaged_fields!(Rotation3D<f64>, Transform2D<f32>, Transform3D<f64>);
+unsafe_no_jsmanaged_fields!(Point2D<f32>, Vector2D<f32>, Rect<Au>);
+unsafe_no_jsmanaged_fields!(Rect<f32>, RigidTransform3D<f64>);
+unsafe_no_jsmanaged_fields!(CascadeData);
 
 unsafe impl<'a> JSTraceable for &'a str {
     #[inline]
@@ -579,27 +592,6 @@ where
     }
 }
 
-unsafe impl JSTraceable for Transform2D<f32> {
-    #[inline]
-    unsafe fn trace(&self, _trc: *mut JSTracer) {
-        // Do nothing
-    }
-}
-
-unsafe impl JSTraceable for Transform3D<f64> {
-    #[inline]
-    unsafe fn trace(&self, _trc: *mut JSTracer) {
-        // Do nothing
-    }
-}
-
-unsafe impl JSTraceable for Point2D<f32> {
-    #[inline]
-    unsafe fn trace(&self, _trc: *mut JSTracer) {
-        // Do nothing
-    }
-}
-
 unsafe impl<T, U> JSTraceable for TypedScale<f32, T, U> {
     #[inline]
     unsafe fn trace(&self, _trc: *mut JSTracer) {
@@ -607,28 +599,7 @@ unsafe impl<T, U> JSTraceable for TypedScale<f32, T, U> {
     }
 }
 
-unsafe impl JSTraceable for Vector2D<f32> {
-    #[inline]
-    unsafe fn trace(&self, _trc: *mut JSTracer) {
-        // Do nothing
-    }
-}
-
 unsafe impl<T> JSTraceable for EuclidLength<u64, T> {
-    #[inline]
-    unsafe fn trace(&self, _trc: *mut JSTracer) {
-        // Do nothing
-    }
-}
-
-unsafe impl JSTraceable for Rect<Au> {
-    #[inline]
-    unsafe fn trace(&self, _trc: *mut JSTracer) {
-        // Do nothing
-    }
-}
-
-unsafe impl JSTraceable for Rect<f32> {
     #[inline]
     unsafe fn trace(&self, _trc: *mut JSTracer) {
         // Do nothing
@@ -745,6 +716,26 @@ where
         for (s, _origin) in self.iter() {
             s.trace(tracer)
         }
+    }
+}
+
+unsafe impl<S> JSTraceable for AuthorStylesheetSet<S>
+where
+    S: JSTraceable + ::style::stylesheets::StylesheetInDocument + PartialEq + 'static,
+{
+    unsafe fn trace(&self, tracer: *mut JSTracer) {
+        for s in self.iter() {
+            s.trace(tracer)
+        }
+    }
+}
+
+unsafe impl<S> JSTraceable for AuthorStyles<S>
+where
+    S: JSTraceable + ::style::stylesheets::StylesheetInDocument + PartialEq + 'static,
+{
+    unsafe fn trace(&self, tracer: *mut JSTracer) {
+        self.stylesheets.trace(tracer)
     }
 }
 

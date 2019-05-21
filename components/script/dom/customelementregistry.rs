@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use crate::compartments::{AlreadyInCompartment, InCompartment};
 use crate::dom::bindings::callback::{CallbackContainer, ExceptionHandling};
 use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::CustomElementRegistryBinding;
@@ -23,10 +24,10 @@ use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::document::Document;
 use crate::dom::domexception::{DOMErrorName, DOMException};
-use crate::dom::element::{CustomElementState, Element};
+use crate::dom::element::Element;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::htmlelement::HTMLElement;
-use crate::dom::node::{document_from_node, window_from_node, Node};
+use crate::dom::node::{document_from_node, window_from_node, Node, ShadowIncluding};
 use crate::dom::promise::Promise;
 use crate::dom::window::Window;
 use crate::microtask::Microtask;
@@ -36,9 +37,9 @@ use html5ever::{LocalName, Namespace, Prefix};
 use js::conversions::ToJSValConvertible;
 use js::glue::UnwrapObject;
 use js::jsapi::{HandleValueArray, Heap, IsCallable, IsConstructor};
-use js::jsapi::{JSAutoCompartment, JSContext, JSObject};
+use js::jsapi::{JSAutoRealm, JSContext, JSObject};
 use js::jsval::{JSVal, NullValue, ObjectValue, UndefinedValue};
-use js::rust::wrappers::{Construct1, JS_GetProperty, JS_SameValue};
+use js::rust::wrappers::{Construct1, JS_GetProperty, SameValue};
 use js::rust::{HandleObject, HandleValue, MutableHandleValue};
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
@@ -46,6 +47,21 @@ use std::mem;
 use std::ops::Deref;
 use std::ptr;
 use std::rc::Rc;
+
+/// <https://dom.spec.whatwg.org/#concept-element-custom-element-state>
+#[derive(Clone, Copy, Eq, JSTraceable, MallocSizeOf, PartialEq)]
+pub enum CustomElementState {
+    Undefined,
+    Failed,
+    Uncustomized,
+    Custom,
+}
+
+impl Default for CustomElementState {
+    fn default() -> CustomElementState {
+        CustomElementState::Uncustomized
+    }
+}
 
 /// <https://html.spec.whatwg.org/multipage/#customelementregistry>
 #[dom_struct]
@@ -308,7 +324,7 @@ impl CustomElementRegistryMethods for CustomElementRegistry {
         // Steps 10.1 - 10.2
         rooted!(in(cx) let mut prototype = UndefinedValue());
         {
-            let _ac = JSAutoCompartment::new(cx, constructor.get());
+            let _ac = JSAutoRealm::new(cx, constructor.get());
             if let Err(error) = self.check_prototype(constructor.handle(), prototype.handle_mut()) {
                 self.element_definition_is_running.set(false);
                 return Err(error);
@@ -318,7 +334,7 @@ impl CustomElementRegistryMethods for CustomElementRegistry {
         // Steps 10.3 - 10.4
         rooted!(in(cx) let proto_object = prototype.to_object());
         let callbacks = {
-            let _ac = JSAutoCompartment::new(cx, proto_object.get());
+            let _ac = JSAutoRealm::new(cx, proto_object.get());
             match unsafe { self.get_callbacks(proto_object.handle()) } {
                 Ok(callbacks) => callbacks,
                 Err(error) => {
@@ -330,7 +346,7 @@ impl CustomElementRegistryMethods for CustomElementRegistry {
 
         // Step 10.5 - 10.6
         let observed_attributes = if callbacks.attribute_changed_callback.is_some() {
-            let _ac = JSAutoCompartment::new(cx, constructor.get());
+            let _ac = JSAutoRealm::new(cx, constructor.get());
             match self.get_observed_attributes(constructor.handle()) {
                 Ok(attributes) => attributes,
                 Err(error) => {
@@ -364,7 +380,7 @@ impl CustomElementRegistryMethods for CustomElementRegistry {
         // Steps 14-15
         for candidate in document
             .upcast::<Node>()
-            .traverse_preorder()
+            .traverse_preorder(ShadowIncluding::Yes)
             .filter_map(DomRoot::downcast::<Element>)
         {
             let is = candidate.get_is();
@@ -405,14 +421,22 @@ impl CustomElementRegistryMethods for CustomElementRegistry {
 
         // Step 1
         if !is_valid_custom_element_name(&name) {
-            let promise = Promise::new(global_scope);
-            promise.reject_native(&DOMException::new(global_scope, DOMErrorName::SyntaxError));
+            let in_compartment_proof = AlreadyInCompartment::assert(&global_scope);
+            let promise = Promise::new_in_current_compartment(
+                &global_scope,
+                InCompartment::Already(&in_compartment_proof),
+            );
+            promise.reject_native(&DOMException::new(&global_scope, DOMErrorName::SyntaxError));
             return promise;
         }
 
         // Step 2
         if self.definitions.borrow().contains_key(&name) {
-            let promise = Promise::new(global_scope);
+            let in_compartment_proof = AlreadyInCompartment::assert(&global_scope);
+            let promise = Promise::new_in_current_compartment(
+                &global_scope,
+                InCompartment::Already(&in_compartment_proof),
+            );
             promise.resolve_native(&UndefinedValue());
             return promise;
         }
@@ -422,7 +446,11 @@ impl CustomElementRegistryMethods for CustomElementRegistry {
 
         // Steps 4, 5
         let promise = map.get(&name).cloned().unwrap_or_else(|| {
-            let promise = Promise::new(global_scope);
+            let in_compartment_proof = AlreadyInCompartment::assert(&global_scope);
+            let promise = Promise::new_in_current_compartment(
+                &global_scope,
+                InCompartment::Already(&in_compartment_proof),
+            );
             map.insert(name, promise.clone());
             promise
         });
@@ -507,7 +535,7 @@ impl CustomElementDefinition {
         rooted!(in(cx) let mut element = ptr::null_mut::<JSObject>());
         {
             // Go into the constructor's compartment
-            let _ac = JSAutoCompartment::new(cx, self.constructor.callback());
+            let _ac = JSAutoRealm::new(cx, self.constructor.callback());
             let args = HandleValueArray::new();
             if unsafe { !Construct1(cx, constructor.handle(), &args, element.handle_mut()) } {
                 return Err(Error::JSFailed);
@@ -637,7 +665,7 @@ fn run_upgrade_constructor(
     rooted!(in(cx) let mut construct_result = ptr::null_mut::<JSObject>());
     {
         // Go into the constructor's compartment
-        let _ac = JSAutoCompartment::new(cx, constructor.callback());
+        let _ac = JSAutoRealm::new(cx, constructor.callback());
         let args = HandleValueArray::new();
         // Step 7.1
         if unsafe {
@@ -654,7 +682,7 @@ fn run_upgrade_constructor(
         let mut same = false;
         rooted!(in(cx) let construct_result_val = ObjectValue(construct_result.get()));
         if unsafe {
-            !JS_SameValue(
+            !SameValue(
                 cx,
                 construct_result_val.handle(),
                 element_val.handle(),
@@ -691,7 +719,7 @@ pub enum CustomElementReaction {
     Upgrade(#[ignore_malloc_size_of = "Rc"] Rc<CustomElementDefinition>),
     Callback(
         #[ignore_malloc_size_of = "Rc"] Rc<Function>,
-        Box<[Heap<JSVal>]>,
+        #[ignore_malloc_size_of = "mozjs"] Box<[Heap<JSVal>]>,
     ),
 }
 

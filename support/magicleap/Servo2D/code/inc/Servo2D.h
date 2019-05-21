@@ -29,7 +29,7 @@ public:
   /**
    * Constructs the Landscape Application.
    */
-  Servo2D();
+  Servo2D(const char* uri, const char* args);
 
   /**
    * Destroys the Landscape Application.
@@ -59,7 +59,12 @@ public:
   /**
    * Update the browser history UI
    */
-  void updateHistory(bool canGoBack, const char* url, bool canGoForward);
+  void updateHistory(bool canGoBack, bool canGoForward);
+
+  /**
+   * Update the browser url bar.
+   */
+  void updateUrl(const char* url);
 
   /**
    * Make the keyboard visible
@@ -139,4 +144,6 @@ private:
   glm::quat controller_orientation_; // The last recorded orientation of the controller (in world coords)
   bool controller_trigger_down_ = false; // Is the controller trigger currently down?
   ServoInstance* servo_ = nullptr; // the servo instance we're embedding
+  const char* uri_ = nullptr;
+  const char* args_ = nullptr;
 };

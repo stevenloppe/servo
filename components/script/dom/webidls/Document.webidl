@@ -40,6 +40,8 @@ interface Document : Node {
   DocumentFragment createDocumentFragment();
   [NewObject]
   Text createTextNode(DOMString data);
+  [NewObject, Throws]
+  CDATASection createCDATASection(DOMString data);
   [NewObject]
   Comment createComment(DOMString data);
   [NewObject, Throws]
@@ -130,7 +132,6 @@ partial /*sealed*/ interface Document {
 
   // user interaction
   readonly attribute Window?/*Proxy?*/ defaultView;
-  readonly attribute Element? activeElement;
   boolean hasFocus();
   // [CEReactions]
   // attribute DOMString designMode;
@@ -152,8 +153,8 @@ Document implements DocumentAndElementEventHandlers;
 
 // https://html.spec.whatwg.org/multipage/#Document-partial
 partial interface Document {
-  [CEReactions, TreatNullAs=EmptyString]
-  attribute DOMString fgColor;
+  [CEReactions]
+  attribute [TreatNullAs=EmptyString] DOMString fgColor;
 
   // https://github.com/servo/servo/issues/8715
   // [CEReactions, TreatNullAs=EmptyString]
@@ -167,8 +168,8 @@ partial interface Document {
   // [CEReactions, TreatNullAs=EmptyString]
   // attribute DOMString alinkColor;
 
-  [CEReactions, TreatNullAs=EmptyString]
-  attribute DOMString bgColor;
+  [CEReactions]
+  attribute [TreatNullAs=EmptyString] DOMString bgColor;
 
   [SameObject]
   readonly attribute HTMLCollection anchors;
@@ -197,17 +198,6 @@ partial interface Document {
       TouchList createTouchList(Touch... touches);
 };
 
-// https://drafts.csswg.org/cssom-view/#dom-document-elementfrompoint
-partial interface Document {
-  Element? elementFromPoint(double x, double y);
-  sequence<Element> elementsFromPoint(double x, double y);
-};
-
-// https://drafts.csswg.org/cssom/#extensions-to-the-document-interface
-partial interface Document {
-  [SameObject] readonly attribute StyleSheetList styleSheets;
-};
-
 // https://fullscreen.spec.whatwg.org/#api
 partial interface Document {
   [LenientSetter] readonly attribute boolean fullscreenEnabled;
@@ -219,3 +209,5 @@ partial interface Document {
   attribute EventHandler onfullscreenchange;
   attribute EventHandler onfullscreenerror;
 };
+
+Document implements DocumentOrShadowRoot;

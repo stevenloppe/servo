@@ -13,7 +13,7 @@ use crate::dom::bindings::reflector::{reflect_dom_object, DomObject, Reflector};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::mutationrecord::MutationRecord;
-use crate::dom::node::Node;
+use crate::dom::node::{Node, ShadowIncluding};
 use crate::dom::window::Window;
 use crate::microtask::Microtask;
 use crate::script_thread::ScriptThread;
@@ -90,13 +90,13 @@ impl MutationObserver {
     }
 
     /// <https://dom.spec.whatwg.org/#queue-a-mutation-observer-compound-microtask>
-    pub fn queue_mutation_observer_compound_microtask() {
+    pub fn queue_mutation_observer_microtask() {
         // Step 1
-        if ScriptThread::is_mutation_observer_compound_microtask_queued() {
+        if ScriptThread::is_mutation_observer_microtask_queued() {
             return;
         }
         // Step 2
-        ScriptThread::set_mutation_observer_compound_microtask_queued(true);
+        ScriptThread::set_mutation_observer_microtask_queued(true);
         // Step 3
         ScriptThread::enqueue_microtask(Microtask::NotifyMutationObservers);
     }
@@ -104,7 +104,7 @@ impl MutationObserver {
     /// <https://dom.spec.whatwg.org/#notify-mutation-observers>
     pub fn notify_mutation_observers() {
         // Step 1
-        ScriptThread::set_mutation_observer_compound_microtask_queued(false);
+        ScriptThread::set_mutation_observer_microtask_queued(false);
         // Step 2
         let notify_list = ScriptThread::get_mutation_observers();
         // TODO: steps 3-4 (slots)
@@ -131,7 +131,7 @@ impl MutationObserver {
         let mut interested_observers: Vec<(DomRoot<MutationObserver>, Option<DOMString>)> = vec![];
 
         // Step 2 & 3
-        for node in target.inclusive_ancestors() {
+        for node in target.inclusive_ancestors(ShadowIncluding::No) {
             for registered in &*node.registered_mutation_observers() {
                 if &*node != target && !registered.options.subtree {
                     continue;
@@ -239,7 +239,7 @@ impl MutationObserver {
         }
 
         // Step 5
-        MutationObserver::queue_mutation_observer_compound_microtask();
+        MutationObserver::queue_mutation_observer_microtask();
     }
 }
 
@@ -318,20 +318,18 @@ impl MutationObserverMethods for MutationObserver {
 
         // Step 8
         if add_new_observer {
-            target
-                .registered_mutation_observers()
-                .push(RegisteredObserver {
-                    observer: DomRoot::from_ref(self),
-                    options: ObserverOptions {
-                        attributes,
-                        attribute_old_value,
-                        character_data,
-                        character_data_old_value,
-                        subtree,
-                        attribute_filter,
-                        child_list,
-                    },
-                });
+            target.add_mutation_observer(RegisteredObserver {
+                observer: DomRoot::from_ref(self),
+                options: ObserverOptions {
+                    attributes,
+                    attribute_old_value,
+                    character_data,
+                    character_data_old_value,
+                    subtree,
+                    attribute_filter,
+                    child_list,
+                },
+            });
 
             self.node_list.borrow_mut().push(DomRoot::from_ref(target));
         }

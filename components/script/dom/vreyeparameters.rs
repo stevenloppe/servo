@@ -22,6 +22,7 @@ pub struct VREyeParameters {
     reflector_: Reflector,
     #[ignore_malloc_size_of = "Defined in rust-webvr"]
     parameters: DomRefCell<WebVREyeParameters>,
+    #[ignore_malloc_size_of = "mozjs"]
     offset: Heap<*mut JSObject>,
     fov: Dom<VRFieldOfView>,
 }
@@ -60,6 +61,10 @@ impl VREyeParameters {
         eye_parameters.offset.set(array.get());
 
         eye_parameters
+    }
+
+    pub fn offset_array(&self) -> [f32; 3] {
+        self.parameters.borrow().offset
     }
 }
 

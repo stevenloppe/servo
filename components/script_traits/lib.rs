@@ -39,6 +39,7 @@ use msg::constellation_msg::{BrowsingContextId, HistoryStateId, PipelineId};
 use msg::constellation_msg::{PipelineNamespaceId, TopLevelBrowsingContextId, TraversalDirection};
 use net_traits::image::base::Image;
 use net_traits::image_cache::ImageCache;
+use net_traits::request::Referrer;
 use net_traits::storage_thread::StorageType;
 use net_traits::{FetchResponseMsg, ReferrerPolicy, ResourceThreads};
 use pixels::PixelFormat;
@@ -50,7 +51,9 @@ use servo_url::ImmutableOrigin;
 use servo_url::ServoUrl;
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::time::Duration;
 use style_traits::CSSPixel;
 use style_traits::SpeculativePainter;
 use webrender_api::{
@@ -138,10 +141,10 @@ pub struct LoadData {
     pub data: Option<Vec<u8>>,
     /// The result of evaluating a javascript scheme url.
     pub js_eval_result: Option<JsEvalResult>,
+    /// The referrer.
+    pub referrer: Option<Referrer>,
     /// The referrer policy.
     pub referrer_policy: Option<ReferrerPolicy>,
-    /// The referrer URL.
-    pub referrer_url: Option<ServoUrl>,
 }
 
 /// The result of evaluating a javascript scheme url.
@@ -159,8 +162,8 @@ impl LoadData {
     pub fn new(
         url: ServoUrl,
         creator_pipeline_id: Option<PipelineId>,
+        referrer: Option<Referrer>,
         referrer_policy: Option<ReferrerPolicy>,
-        referrer_url: Option<ServoUrl>,
     ) -> LoadData {
         LoadData {
             url: url,
@@ -169,8 +172,8 @@ impl LoadData {
             headers: HeaderMap::new(),
             data: None,
             js_eval_result: None,
+            referrer: referrer,
             referrer_policy: referrer_policy,
-            referrer_url: referrer_url,
         }
     }
 }
@@ -261,6 +264,8 @@ pub enum ConstellationControlMsg {
     Resize(PipelineId, WindowSizeData, WindowSizeType),
     /// Notifies script that window has been resized but to not take immediate action.
     ResizeInactive(PipelineId, WindowSizeData),
+    /// Window switched from fullscreen mode.
+    ExitFullScreen(PipelineId),
     /// Notifies the script that the document associated with this pipeline should 'unload'.
     UnloadDocument(PipelineId),
     /// Notifies the script that a pipeline should be closed.
@@ -303,6 +308,7 @@ pub enum ConstellationControlMsg {
     UpdatePipelineId(
         PipelineId,
         BrowsingContextId,
+        TopLevelBrowsingContextId,
         PipelineId,
         UpdatePipelineIdReason,
     ),
@@ -386,6 +392,7 @@ impl fmt::Debug for ConstellationControlMsg {
             Reload(..) => "Reload",
             WebVREvents(..) => "WebVREvents",
             PaintMetric(..) => "PaintMetric",
+            ExitFullScreen(..) => "ExitFullScreen",
         };
         write!(formatter, "ConstellationControlMsg::{}", variant)
     }
@@ -437,11 +444,11 @@ pub struct TouchId(pub i32);
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub enum MouseButton {
     /// The left mouse button.
-    Left,
-    /// The middle mouse button.
-    Middle,
+    Left = 1,
     /// The right mouse button.
-    Right,
+    Right = 2,
+    /// The middle mouse button.
+    Middle = 4,
 }
 
 /// The types of mouse events
@@ -467,9 +474,16 @@ pub enum CompositorEvent {
         Point2D<f32>,
         Option<UntrustedNodeAddress>,
         Option<Point2D<f32>>,
+        // Bitmask of MouseButton values representing the currently pressed buttons
+        u16,
     ),
     /// The mouse was moved over a point (or was moved out of the recognizable region).
-    MouseMoveEvent(Option<Point2D<f32>>, Option<UntrustedNodeAddress>),
+    MouseMoveEvent(
+        Option<Point2D<f32>>,
+        Option<UntrustedNodeAddress>,
+        // Bitmask of MouseButton values representing the currently pressed buttons
+        u16,
+    ),
     /// A touch event was generated with a touch ID and location.
     TouchEvent(
         TouchEventType,
@@ -595,6 +609,8 @@ pub struct InitialScriptState {
     pub webrender_document: DocumentId,
     /// FIXME(victor): The Webrender API sender in this constellation's pipeline
     pub webrender_api_sender: RenderApiSender,
+    /// Flag to indicate if the layout thread is busy handling a request.
+    pub layout_is_busy: Arc<AtomicBool>,
 }
 
 /// This trait allows creating a `ScriptThread` without depending on the `script`
@@ -776,6 +792,12 @@ pub enum ConstellationMsg {
     ForwardEvent(PipelineId, CompositorEvent),
     /// Requesting a change to the onscreen cursor.
     SetCursor(Cursor),
+    /// Enable the sampling profiler, with a given sampling rate and max total sampling duration.
+    EnableProfiler(Duration, Duration),
+    /// Disable the sampling profiler.
+    DisableProfiler,
+    /// Request to exit from fullscreen mode
+    ExitFullScreen(TopLevelBrowsingContextId),
 }
 
 impl fmt::Debug for ConstellationMsg {
@@ -803,6 +825,9 @@ impl fmt::Debug for ConstellationMsg {
             SelectBrowser(..) => "SelectBrowser",
             ForwardEvent(..) => "ForwardEvent",
             SetCursor(..) => "SetCursor",
+            EnableProfiler(..) => "EnableProfiler",
+            DisableProfiler => "DisableProfiler",
+            ExitFullScreen(..) => "ExitFullScreen",
         };
         write!(formatter, "ConstellationMsg::{}", variant)
     }
