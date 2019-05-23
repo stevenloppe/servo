@@ -116,7 +116,7 @@ use html5ever::{LocalName, Namespace, QualName};
 use hyper_serde::Serde;
 use ipc_channel::ipc::{self, IpcSender};
 use js::jsapi::{JSContext, JSObject, JSRuntime};
-use keyboard_types::{Key, KeyState, Code};
+use keyboard_types::{Code, Key, KeyState};
 use metrics::{
     InteractiveFlag, InteractiveMetrics, InteractiveWindow, ProfilerMetadataFactory,
     ProgressiveWebMetric,
@@ -1401,7 +1401,8 @@ impl Document {
             // https://www.w3.org/Bugs/Public/show_bug.cgi?id=27337
 
             if (keyboard_event.key == Key::Enter && keyboard_event.state == KeyState::Up) ||
-                (keyboard_event.code == Code::Space && keyboard_event.state == KeyState::Down) {
+                (keyboard_event.code == Code::Space && keyboard_event.state == KeyState::Down)
+            {
                 let maybe_elem = target.downcast::<Element>();
                 if let Some(el) = maybe_elem {
                     synthetic_click_activation(
